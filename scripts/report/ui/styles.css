@@ -384,11 +384,14 @@ input::placeholder { color: var(--ink-3); }
 .detail-state { color: var(--ink-2); margin-top: 0.2rem; max-width: 60ch; }
 
 .command {
-  display: flex; align-items: center; gap: 0.5rem;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem;
   margin-top: 1rem; padding: 0.5rem 0.5rem 0.5rem 0.75rem;
   background: var(--strip); border-radius: 3px; border-left: 4px solid var(--ink);
 }
-.command code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font-size: var(--fs-1); }
+.command code { flex: 1 1 14rem; min-width: 0; overflow-x: auto; white-space: nowrap; font-size: var(--fs-1); }
+.command-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.job-line { margin-top: 0.5rem; }
+.job-line .btn-quiet { padding-block: 0; }
 
 .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.3rem 1rem; margin-top: 1rem; }
 .facts dt { color: var(--ink-2); }
@@ -416,6 +419,53 @@ input::placeholder { color: var(--ink-3); }
 .shots { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
 .shot { padding: 0; border: 1px solid var(--rule); border-radius: 3px; background: var(--ground); cursor: zoom-in; overflow: hidden; }
 .shot img { display: block; width: 8.5rem; height: 5.5rem; object-fit: cover; }
+
+
+/* ---- jobs: what a machine was asked to do ---------------------------------- */
+
+#jobs-button[data-attention='true'] { box-shadow: inset 0 -3px 0 var(--mark); }
+
+.job-row {
+  display: grid; grid-template-columns: var(--tab) minmax(0, 1fr); align-items: start;
+  background: var(--strip); border-radius: 3px; cursor: pointer;
+}
+.job-row:hover { background: var(--strip-lift); }
+.job-row:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.job-tab {
+  align-self: stretch; display: flex; justify-content: center; padding-top: 0.45rem;
+  border-radius: 3px 0 0 3px; border-right: 1px solid var(--rule);
+  color: var(--ink-3); font: 800 var(--fs-3)/1 var(--display);
+}
+.job-row[data-state='running'] .job-tab { background: var(--live); color: #16222c; border-right-color: transparent; }
+.job-row[data-state='needs-input'] .job-tab, .job-row[data-attention='true'] .job-tab { background: var(--mark); color: var(--mark-ink); border-right-color: transparent; }
+.job-row[data-state='failed'] .job-tab, .job-row[data-state='refused'] .job-tab { color: var(--trouble); }
+.job-body { min-width: 0; padding: 0.45rem 0.75rem 0.5rem; }
+.job-title { font-weight: 700; line-height: 1.3; }
+.job-actions { justify-content: flex-start; padding: 0.75rem 0 0; }
+
+.job-question { margin-top: 0.75rem; padding: 0.6rem 0.75rem 0.75rem; background: var(--strip); border-radius: 3px; border-left: 4px solid var(--mark); }
+.job-question[data-open='false'] { border-left-color: var(--rule); }
+.job-question[data-kind='permission'][data-open='true'] { border-left-color: var(--ink); }
+.job-question pre { margin-top: 0.4rem; padding: 0.5rem 0.6rem; background: var(--ground); border-radius: 3px; font-size: var(--fs-0); white-space: pre-wrap; overflow-wrap: anywhere; }
+.job-question .composer { grid-column: auto; padding: 0; margin-top: 0.5rem; }
+.job-question .answer { margin-top: 0.5rem; }
+.answer-history .job-question { margin-top: 0.5rem; }
+
+.job-log { margin-top: 0.25rem; padding: 0.4rem 0.75rem; background: var(--strip); border-radius: 3px; font-size: var(--fs-0); line-height: 1.5; max-width: 80ch; }
+.log-line { padding: 0.25rem 0; border-top: 1px dotted var(--rule); overflow-wrap: anywhere; }
+.log-line:first-child { border-top: 0; }
+.log-text { white-space: pre-wrap; max-width: 70ch; }
+.log-line .log-text + .log-text, .log-line .log-text + .log-tool, .log-line .log-tool + .log-text { margin-top: 0.3rem; }
+.log-tool, .log-result { font-family: var(--code); }
+.log-result { color: var(--ink-2); }
+.log-result[data-error='true'] { color: var(--trouble); }
+.log-meta { color: var(--ink-3); }
+.log-end { font-weight: 700; }
+.log-end[data-error='true'] { color: var(--trouble); }
+.log-end .log-text { font-weight: 400; margin-top: 0.3rem; }
+/* The log breathes while a session runs: a faint pulse on its edge, nothing that moves text. */
+@keyframes live-edge { from { border-left-color: var(--live); } to { border-left-color: var(--rule); } }
+.job-log[data-live='true'] { border-left: 3px solid var(--rule); animation: live-edge 2s ease-in-out infinite alternate; }
 
 /* ---- prose (rendered markdown) ------------------------------------------- */
 
@@ -493,10 +543,12 @@ kbd { padding: 0.05rem 0.4rem; border: 1px solid var(--rule); border-bottom-widt
   .toast { bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px)); }
 
   /* The save bar stays in sight: above the tab bar, and above the keyboard once it opens. */
-  .slip[data-place='detail'] .composer-save {
+  .slip[data-place='detail'] .composer-save, .job-question .composer-save {
     position: sticky; bottom: calc(3.75rem + env(safe-area-inset-bottom, 0px)); z-index: 2;
     margin-inline: -0.6rem; padding: 0.5rem 0.6rem; background: var(--strip-lift); border-top: 1px solid var(--rule);
   }
-  body[data-keyboard='open'] .slip[data-place='detail'] .composer-save { bottom: var(--keyboard, 0px); }
-  .slip[data-place='detail'] .composer-save .btn-primary { flex: 1 1 auto; }
+  .job-question .composer-save { margin-inline: -0.75rem; padding-inline: 0.75rem; }
+  body[data-keyboard='open'] .slip[data-place='detail'] .composer-save, body[data-keyboard='open'] .job-question .composer-save { bottom: var(--keyboard, 0px); }
+  .slip[data-place='detail'] .composer-save .btn-primary, .job-question .composer-save .btn-primary { flex: 1 1 auto; }
+  .job-row .job-body { padding-block: 0.6rem; }
 }

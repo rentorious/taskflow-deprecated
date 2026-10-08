@@ -219,6 +219,22 @@ describe('the job queue', () => {
     assert.equal((await res.json()).machine.pausedUntil, null);
   });
 
+  test('the mounted dashboard still serves the page, with the jobs control, and the list answers a session', async () => {
+    const res = await ann.get('/p/harbor/u/ann/');
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /id="jobs-button"/);
+    assert.match(html, /<script type="module" src="app.js">/);
+    const list = await ann.get(api('jobs?limit=5'));
+    assert.equal(list.status, 200);
+    const body = await list.json();
+    assert.ok(Array.isArray(body.jobs) && body.jobs.length <= 5);
+    assert.equal(typeof body.rev, 'number');
+    const js = await ann.get('/p/harbor/u/ann/app.js');
+    assert.equal(js.status, 200);
+    assert.match(await js.text(), /JOBS_API/);
+  });
+
   test('an open page hears about a job over SSE without a model rebuild', async () => {
     const controller = new AbortController();
     const cookie = [...ann.jar].map(([name, c]) => `${name}=${c.value}`).join('; ');

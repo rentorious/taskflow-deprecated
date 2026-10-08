@@ -15,7 +15,7 @@ const state = {
   me: null, // hosted only: { login, role, owner, ownsCycle, canWrite }
   cycles: [],
   cycle: 'live',
-  sel: null, // {type: 'batch'|'task'|'item', id}
+  sel: null, // {type: 'batch'|'task'|'item'|'job', id} or {type: 'jobs'}
   filters: {}, // facetKey -> Set(values)
   query: '',
   filtersOpen: false,
@@ -29,6 +29,9 @@ const state = {
   dropping: null, // itemId whose "why drop it" input is open
   reanswering: new Set(), // settled questions whose composer was opened on purpose
   live: SNAPSHOT ? 'snapshot' : 'connecting',
+  jobs: null, // hosted only: { jobs: [...], rev } — what the dashboard asked this developer's machines to do
+  jobDetail: null, // { id, job, questions, events, lastSeq } for the open job
+  jobDrafts: new Map(), // question id -> text being typed (this page only)
 };
 
 // ---------------------------------------------------------------------------
@@ -256,7 +259,7 @@ function readHash() {
   const id = decodeURIComponent(rest.join('/'));
   const params = new URLSearchParams(query);
 
-  state.sel = ['batch', 'task', 'item'].includes(type) && id ? { type, id } : null;
+  state.sel = ['batch', 'task', 'item', 'job'].includes(type) && id ? { type, id } : type === 'jobs' ? { type: 'jobs' } : null;
   state.cycle = SNAPSHOT ? SNAPSHOT.model.cycle.id : params.get('cycle') || 'live';
   state.query = params.get('q') || '';
   state.filters = {};
@@ -270,7 +273,7 @@ function writeHash({ push = false } = {}) {
   if (state.cycle !== 'live' && !SNAPSHOT) params.set('cycle', state.cycle);
   if (state.query) params.set('q', state.query);
   for (const [key, values] of Object.entries(state.filters)) if (values.size) params.set(`f.${key}`, [...values].join(','));
-  const path = state.sel ? `/${state.sel.type}/${encodeURIComponent(state.sel.id)}` : '/';
+  const path = state.sel ? `/${state.sel.type}/${state.sel.id ? encodeURIComponent(state.sel.id) : ''}` : '/';
   const query = params.toString();
   const next = `#${path}${query ? `?${query}` : ''}`;
   if (next === location.hash) return;
@@ -655,6 +658,262 @@ function composer(item) {
   );
 }
 
+
+// ---------------------------------------------------------------------------
+// Jobs — hosted only. The page asks a developer's own machine to run something;
+// the runner there reports back. Nothing here exists for a local report or a snapshot.
+// ---------------------------------------------------------------------------
+
+// The project key is in the mount path, nowhere else: /p/<project>/u/<login>/
+const PROJECT = MOUNTED ? (/^\/p\/([^/]+)\/u\//.exec(location.pathname)?.[1] ?? null) : null;
+const JOBS_API = PROJECT ? `/api/p/${PROJECT}` : null;
+const OPEN_JOB = new Set(['queued', 'running', 'needs-input']);
+
+const jobsHosted = () => Boolean(JOBS_API && state.me?.signedIn && state.cycle === 'live');
+// Start is for the developer whose board this is; the server refuses anyone else anyway.
+const canStartJobs = () => jobsHosted() && state.me.ownsCycle === true && !state.model?.cycle.isArchive;
+
+const JOB_STATE = {
+  queued: ['…', 'Queued', 'Waiting for your machine to pick it up'],
+  running: ['▶', 'Running', 'A session is working on it'],
+  'needs-input': ['?', 'Needs you', 'Parked until you answer; then it resumes'],
+  done: ['✓', 'Done', 'The session finished'],
+  failed: ['×', 'Failed', 'The session ended with an error'],
+  refused: ['×', 'Refused', 'The runner would not start it'],
+  expired: ['–', 'Expired', 'No machine took it in time'],
+  cancelled: ['–', 'Cancelled', 'Cancelled before it started'],
+};
+
+function elapsed(ms) {
+  if (ms === null || ms === undefined || Number.isNaN(ms)) return '';
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ${String(s % 60).padStart(2, '0')} s`;
+  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`;
+}
+const money = (usd) => (usd === null || usd === undefined ? '' : `$${Number(usd).toFixed(2)}`);
+const jobTitle = (job) => (job.kind === 'implement' ? `Implement ${state.model?.batches[job.args.batchKey] ? batchLabel(state.model.batches[job.args.batchKey]) : job.args.batchKey}` : job.kind);
+const jobClock = (job) => {
+  if (OPEN_JOB.has(job.state)) return job.state === 'queued' ? ago(job.createdAt) : `${elapsed(Date.now() - new Date(job.startedAt ?? job.leasedAt ?? job.createdAt).getTime())} so far`;
+  return job.result?.duration_ms ? elapsed(job.result.duration_ms) : job.finishedAt ? `ended ${ago(job.finishedAt)}` : '';
+};
+const openJobFor = (batchKey) => state.jobs?.jobs.find((j) => j.kind === 'implement' && j.args.batchKey === batchKey && OPEN_JOB.has(j.state)) ?? null;
+
+async function loadJobs() {
+  if (!jobsHosted()) { state.jobs = null; renderJobsButton(); return; }
+  try { state.jobs = await getJson(`${JOBS_API}/jobs?limit=50`); } catch { return; }
+  renderJobsButton();
+}
+
+/** The open job's detail; `tail` fetches only events newer than what the page has. */
+async function loadJob(id, { tail = false } = {}) {
+  if (!jobsHosted()) return;
+  const have = state.jobDetail?.id === id ? state.jobDetail : null;
+  const after = tail && have ? have.lastSeq : 0;
+  let got;
+  try { got = await getJson(`${JOBS_API}/jobs/${encodeURIComponent(id)}?after=${after}`); } catch (error) { if (!have) state.jobDetail = { id, error: error.message, job: null, questions: [], events: [], lastSeq: 0 }; return; }
+  const events = after && have ? have.events.concat(got.events) : got.events;
+  state.jobDetail = { id, job: got.job, questions: got.questions, events, lastSeq: events.length ? events[events.length - 1].seq : 0 };
+}
+
+async function refreshJobs() {
+  await loadJobs();
+  if (state.sel?.type === 'job') await loadJob(state.sel.id, { tail: true });
+  if (state.sel?.type === 'job' || state.sel?.type === 'jobs' || state.sel?.type === 'batch') renderDetail();
+}
+
+/** POST to the jobs API. Returns true when the server took it. Always refreshes the jobs afterwards. */
+async function postJob(path, payload, done) {
+  let ok = false;
+  try {
+    const res = await fetch(`${JOBS_API}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    if (signInAgain(res)) return false;
+    ok = res.ok;
+    if (!res.ok) toast((await res.json().catch(() => ({}))).error || `Could not do that (${res.status}).`, 3600);
+    else toast(done);
+  } catch {
+    toast('The dashboard is not answering. Nothing was changed.', 3200);
+  }
+  await refreshJobs();
+  return ok;
+}
+
+const startJob = (batchKey) => postJob('/jobs', { kind: 'implement', args: { batchKey } }, 'Queued for your machine');
+const cancelJob = (job) => postJob(`/jobs/${encodeURIComponent(job.id)}/cancel`, {}, 'Cancelled');
+async function answerJobQuestion(question, answer) {
+  document.activeElement?.blur();
+  const ok = await postJob(`/jobs/${encodeURIComponent(question.jobId)}/questions/${encodeURIComponent(question.id)}/answer`, { answer }, question.kind === 'permission' ? (answer.decision === 'allow' ? 'Allowed' : 'Denied') : 'Answer sent');
+  if (ok) { state.jobDrafts.delete(question.id); renderDetail(); }
+}
+
+function renderJobsButton() {
+  const button = $('jobs-button');
+  if (!jobsHosted() || !state.jobs) { button.hidden = true; return; }
+  const open = state.jobs.jobs.filter((j) => OPEN_JOB.has(j.state));
+  const asking = state.jobs.jobs.reduce((n, j) => n + (OPEN_JOB.has(j.state) ? j.openQuestions : 0), 0);
+  button.hidden = false;
+  button.textContent = asking ? `Jobs · ${plural(asking, 'question')} for you` : open.length ? `Jobs · ${open.length} open` : 'Jobs';
+  button.dataset.attention = String(asking > 0);
+  button.setAttribute('aria-pressed', String(state.sel?.type === 'jobs' || state.sel?.type === 'job'));
+}
+
+/** The Start control for a ready batch, and the line that says a job is already on it. */
+function startControls(b) {
+  if (!canStartJobs()) return { button: null, line: null };
+  const open = openJobFor(b.key);
+  const button = h('button', { type: 'button', class: 'btn btn-primary', disabled: Boolean(open) || null, onclick: () => startJob(b.key) }, open ? JOB_STATE[open.state][1] : 'Start on my machine');
+  const line = open ? h('p', { class: 'slip-meta job-line' },
+    `${JOB_STATE[open.state][1]}${open.machineName ? ` on ${open.machineName}` : ''}${open.state === 'queued' ? ` ${jobClock(open)}` : ` · ${jobClock(open)}`}${open.openQuestions ? ` · ${plural(open.openQuestions, 'question')} for you` : ''}. `,
+    h('button', { type: 'button', class: 'btn btn-quiet', onclick: () => select({ type: 'job', id: open.id }, { focusDetail: narrow() }) }, 'Open the job')) : null;
+  return { button, line };
+}
+
+function jobRow(job) {
+  const [glyph, word] = JOB_STATE[job.state] ?? ['•', job.state];
+  const bits = [word, job.machineName, jobClock(job), money(job.result?.total_cost_usd), job.openQuestions && OPEN_JOB.has(job.state) ? `${plural(job.openQuestions, 'question')} for you` : null].filter(Boolean);
+  return h('article', {
+    class: 'job-row', dataset: { state: job.state, attention: String(Boolean(job.openQuestions && OPEN_JOB.has(job.state))) }, tabindex: '0',
+    onclick: () => select({ type: 'job', id: job.id }, { focusDetail: narrow() }),
+    onkeydown: (event) => { if (event.key === 'Enter') select({ type: 'job', id: job.id }, { focusDetail: true }); },
+  },
+    h('div', { class: 'job-tab', 'aria-hidden': 'true' }, glyph),
+    h('div', { class: 'job-body' }, h('h3', { class: 'job-title' }, jobTitle(job)), h('p', { class: 'slip-meta' }, bits.join(' · '))),
+  );
+}
+
+function jobsList() {
+  const jobs = state.jobs?.jobs ?? [];
+  const open = jobs.filter((j) => OPEN_JOB.has(j.state));
+  const past = jobs.filter((j) => !OPEN_JOB.has(j.state));
+  return [
+    h('div', { class: 'detail-head' },
+      h('div', { class: 'detail-num', 'aria-hidden': 'true' }, '▶'),
+      h('div', null, h('h2', { class: 'detail-title' }, 'Jobs'), h('p', { class: 'detail-state' }, open.length ? `${plural(open.length, 'job')} open on your machines.` : 'Nothing is running. Start a ready batch from its page.'))),
+    open.length ? h('section', { class: 'section' }, h('h3', { class: 'section-title' }, 'Open'), h('div', { class: 'lane-list' }, open.map(jobRow))) : null,
+    past.length ? h('section', { class: 'section' }, h('h3', { class: 'section-title' }, 'Earlier'), h('div', { class: 'lane-list' }, past.map(jobRow))) : null,
+    !jobs.length ? h('p', { class: 'slip-meta' }, 'No job has been asked for yet. A ready batch has a Start button; the runner on your machine picks it up.') : null,
+  ];
+}
+
+const clipText = (text, max) => (text.length > max ? `${text.slice(0, max)}…` : text);
+
+function logLine(e) {
+  if (e.type === 'system' && e.subtype === 'init') return h('div', { class: 'log-line log-meta' }, `Session started · ${e.model ?? 'model'} · permissions: ${e.permissionMode ?? '?'}`);
+  if (e.type === 'rate_limit_event' && e.rate_limit_info) {
+    const windows = e.rate_limit_info.unifiedWindows ?? {};
+    const parts = Object.entries(windows).map(([kind, w]) => `${kind.replace('_', ' ')} ${Math.round((w?.utilization ?? 0) * 100)}%`);
+    return parts.length ? h('div', { class: 'log-line log-meta' }, `Plan usage · ${parts.join(' · ')}`) : null;
+  }
+  if (e.type === 'result') {
+    const ok = !e.is_error && e.subtype === 'success';
+    return h('div', { class: 'log-line log-end', dataset: { error: String(!ok) } },
+      `${ok ? 'Done' : 'Failed'}${e.total_cost_usd !== null && e.total_cost_usd !== undefined ? ` · ${money(e.total_cost_usd)}` : ''}${e.num_turns ? ` · ${plural(e.num_turns, 'turn')}` : ''}${e.duration_ms ? ` · ${elapsed(e.duration_ms)}` : ''}`,
+      e.result ? h('p', { class: 'log-text' }, clipText(e.result, 600)) : null);
+  }
+  if (e.type === 'assistant' || e.type === 'user') {
+    const lines = (e.content ?? []).map((block) => {
+      if (block.type === 'text' && block.text?.trim()) return h('p', { class: 'log-text' }, block.text);
+      if (block.type === 'tool_use') return h('div', { class: 'log-tool' }, `${block.name}(`, h('span', { class: 'log-meta' }, clipText(String(block.input ?? ''), 160)), ')');
+      if (block.type === 'tool_result') return h('div', { class: 'log-result', dataset: { error: String(block.is_error === true) } }, `↳ ${clipText(String(block.content ?? '').replace(/\s+/g, ' ').trim(), 160) || '(empty)'}`);
+      return null;
+    }).filter(Boolean);
+    return lines.length ? h('div', { class: 'log-line' }, lines) : null;
+  }
+  return null;
+}
+
+/** The tool's input as a person reads it: the command itself for Bash, the path for a file tool, the JSON otherwise. */
+function permissionInput(input) {
+  const text = String(input);
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object') {
+      if (typeof parsed.command === 'string') return parsed.command;
+      if (typeof parsed.file_path === 'string' && Object.keys(parsed).length <= 2) return parsed.file_path;
+      return JSON.stringify(parsed, null, 2);
+    }
+  } catch { /* not JSON: already the text to show */ }
+  return text;
+}
+
+/** A question the session asked, or a permission it needs. Open ones carry a composer. */
+function jobQuestion(q) {
+  const open = !q.answeredAt;
+  const asked = q.question ?? {};
+  const head = q.kind === 'permission'
+    ? [h('p', { class: 'slip-title' }, `May it run ${asked.tool ?? 'a tool'}?`), asked.input ? h('pre', null, clipText(permissionInput(asked.input), 1200)) : null, asked.reason ? h('p', { class: 'slip-meta' }, asked.reason) : null]
+    : [h('p', { class: 'slip-title' }, asked.text ?? '')];
+  const meta = open
+    ? h('p', { class: 'slip-meta' }, `Asked ${ago(q.askedAt)}.${q.parkedAt ? ' The session stopped waiting; your answer resumes it.' : ' The session is waiting for this.'}`)
+    : h('p', { class: 'slip-meta' }, `${q.kind === 'permission' ? (q.answer?.decision === 'allow' ? 'Allowed' : 'Denied') : 'Answered'} ${ago(q.answeredAt)}${q.kind === 'permission' && q.answer?.note ? `: ${q.answer.note}` : ''}`);
+  const given = !open && q.kind === 'ask' && q.answer?.text ? h('div', { class: 'answer' }, h('p', { class: 'answer-head' }, h('strong', null, 'Answer')), h('p', { class: 'log-text' }, q.answer.text)) : null;
+
+  let composer = null;
+  if (open && canStartJobs()) {
+    if (q.kind === 'permission') {
+      composer = h('div', { class: 'composer', dataset: { itemId: q.id } },
+        h('div', { class: 'composer-actions composer-save' },
+          h('button', { type: 'button', class: 'btn btn-primary', onclick: () => answerJobQuestion(q, { decision: 'allow' }) }, 'Allow'),
+          h('button', { type: 'button', class: 'btn', onclick: () => answerJobQuestion(q, { decision: 'deny' }) }, 'Deny')));
+    } else {
+      const grow = (el) => { el.style.height = 'auto'; el.style.height = `${el.scrollHeight + 2}px`; };
+      const body = h('textarea', {
+        class: 'composer-body', rows: '3', maxlength: '8000', enterkeyhint: 'enter', autocapitalize: 'sentences', 'aria-label': 'Your answer',
+        placeholder: 'Your answer',
+        oninput: (event) => { state.jobDrafts.set(q.id, event.target.value); grow(event.target); send.disabled = !event.target.value.trim(); },
+        onkeydown: (event) => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && body.value.trim()) { event.preventDefault(); answerJobQuestion(q, { text: body.value }); } },
+      });
+      body.value = state.jobDrafts.get(q.id) ?? '';
+      const send = h('button', { type: 'button', class: 'btn btn-primary', onclick: () => answerJobQuestion(q, { text: body.value }) }, 'Send answer');
+      send.disabled = !body.value.trim();
+      requestAnimationFrame(() => grow(body));
+      const options = asked.options?.length ? h('div', { class: 'composer-options', role: 'group', 'aria-label': 'Answer with one of the choices' },
+        asked.options.map((option) => h('button', { type: 'button', class: 'btn btn-option', onclick: () => { body.value = option; state.jobDrafts.set(q.id, option); send.disabled = false; grow(body); body.focus({ preventScroll: true }); } }, option))) : null;
+      composer = h('div', {
+        class: 'composer', dataset: { itemId: q.id },
+        onfocusout: (event) => { if (!event.currentTarget.contains(event.relatedTarget) && state.detailStale) requestAnimationFrame(() => { if (!isTypingAnswer()) renderDetail(); }); },
+      }, options, body, h('div', { class: 'composer-actions composer-save' }, send, h('span', { class: 'slip-meta composer-hint' }, 'Ctrl+Enter sends.')));
+    }
+  }
+  return h('div', { class: 'job-question', dataset: { kind: q.kind, open: String(open) } }, head, meta, given, composer);
+}
+
+function jobDetailView(id) {
+  const d = state.jobDetail?.id === id ? state.jobDetail : null;
+  if (!d) { loadJob(id).then(() => renderDetail()).catch(() => {}); return [h('div', { class: 'detail-empty' }, h('h2', null, 'Loading the job'))]; }
+  if (!d.job) return [h('div', { class: 'detail-empty' }, h('h2', null, 'No such job'), h('p', null, d.error ?? 'It may belong to someone else, or it was removed.'))];
+  const job = d.job;
+  const [glyph, word, sentence] = JOB_STATE[job.state] ?? ['•', job.state, ''];
+  const batch = job.kind === 'implement' ? state.model?.batches[job.args.batchKey] : null;
+  const open = d.questions.filter((q) => !q.answeredAt);
+  const settled = d.questions.filter((q) => q.answeredAt);
+  const result = job.result;
+
+  return [
+    h('div', { class: 'detail-head' },
+      h('div', { class: 'detail-num', dataset: { lane: OPEN_JOB.has(job.state) ? 'in-flight' : 'shipped' }, 'aria-hidden': 'true' }, glyph),
+      h('div', null, h('h2', { class: 'detail-title' }, jobTitle(job)), h('p', { class: 'detail-state' }, `${word}. ${sentence}.`))),
+    h('div', { class: 'slip-actions job-actions' },
+      batch ? h('button', { type: 'button', class: 'btn', onclick: () => select({ type: 'batch', id: batch.key }, { focusDetail: narrow() }) }, 'Open the batch') : null,
+      job.state === 'queued' && canStartJobs() ? h('button', { type: 'button', class: 'btn', onclick: () => cancelJob(job) }, 'Cancel') : null,
+      job.sessionId ? copyButton('Copy resume command', `claude --resume ${job.sessionId}`, 'Command copied') : null),
+    h('dl', { class: 'facts' },
+      fact('Machine', job.machineName ?? 'none yet'),
+      fact('Asked', `${ago(job.createdAt)}${job.requestedByLogin ? ` by ${job.requestedByLogin}` : ''}`),
+      job.startedAt ? fact(OPEN_JOB.has(job.state) ? 'Running for' : 'Took', OPEN_JOB.has(job.state) ? elapsed(Date.now() - new Date(job.startedAt).getTime()) : elapsed(result?.duration_ms ?? (new Date(job.finishedAt).getTime() - new Date(job.startedAt).getTime()))) : null,
+      result?.total_cost_usd !== null && result?.total_cost_usd !== undefined ? fact('Cost', money(result.total_cost_usd)) : null,
+      result?.num_turns ? fact('Turns', String(result.num_turns)) : null,
+      job.sessionId ? fact('Session', h('code', null, job.sessionId)) : null,
+      job.error ? fact('Error', h('span', { class: 'log-result', dataset: { error: 'true' } }, job.error)) : null,
+    ),
+    open.length ? h('section', { class: 'section' }, h('h3', { class: 'section-title' }, open.length === 1 ? 'Waiting on you' : `${open.length} waiting on you`), open.map(jobQuestion)) : null,
+    settled.length ? h('section', { class: 'section' }, h('details', { class: 'answer-history' }, h('summary', null, plural(settled.length, 'answered question')), settled.map(jobQuestion))) : null,
+    h('section', { class: 'section' }, h('h3', { class: 'section-title' }, 'Log'),
+      d.events.length ? h('div', { class: 'job-log', dataset: { live: String(OPEN_JOB.has(job.state)) } }, d.events.map(logLine).filter(Boolean)) : h('p', { class: 'slip-meta' }, job.state === 'queued' ? 'Nothing yet. Your machine has not picked this up.' : 'No events were recorded.')),
+  ];
+}
+
 // ---------------------------------------------------------------------------
 // Queue
 // ---------------------------------------------------------------------------
@@ -1014,6 +1273,7 @@ function batchDetail(b) {
   const branch = b.branch ?? b.suggestedBranch;
   const agent = range(b.estimate.agent);
   const human = range(b.estimate.human);
+  const start = startControls(b);
 
   return [
     h('div', { class: 'detail-head' },
@@ -1021,7 +1281,10 @@ function batchDetail(b) {
       h('div', null,
         h('h2', { class: 'detail-title' }, b.name),
         h('p', { class: 'detail-state' }, laneSentence(b)))),
-    command ? h('div', { class: 'command' }, h('code', null, command), copyButton(b.lane === 'ready' ? 'Copy start command' : 'Copy command', command, 'Command copied', 'btn btn-primary')) : null,
+    command ? h('div', { class: 'command' }, h('code', null, command), h('div', { class: 'command-actions' },
+      b.lane === 'ready' ? start.button : null,
+      copyButton(b.lane === 'ready' ? 'Copy start command' : 'Copy command', command, 'Command copied', b.lane === 'ready' && start.button ? 'btn' : 'btn btn-primary'))) : null,
+    start.line,
     h('dl', { class: 'facts' },
       branch ? fact(b.branch ? 'Branch' : 'Suggested branch', h('code', null, branch), copyButton('Copy', branch, 'Branch copied', 'btn btn-quiet')) : null,
       b.dependsOn.length ? fact('Waits on', b.dependsOn.map((d) => refButton(d.key)), b.blockedBy.length ? `${b.blockedBy.length} still to finish` : 'all finished') : fact('Waits on', 'Nothing'),
@@ -1052,6 +1315,10 @@ function renderDetail() {
 
   if (sel?.type === 'batch' && m.batches[sel.id]) {
     content = batchDetail(m.batches[sel.id]);
+  } else if (sel?.type === 'jobs' && jobsHosted()) {
+    content = jobsList();
+  } else if (sel?.type === 'job' && jobsHosted()) {
+    content = jobDetailView(sel.id);
   } else if (sel?.type === 'task' && m.tasks[sel.id]) {
     const task = m.tasks[sel.id];
     if (task.batch) { content = batchDetail(m.batches[task.batch]); scrollTo = `task-${task.id}`; }
@@ -1072,10 +1339,15 @@ function renderDetail() {
   // iOS will not reopen the keyboard for a focus() we make. Wait for the blur.
   if (key === state.detailKey && isTypingAnswer()) { state.detailStale = true; return; }
   state.detailStale = false;
+  const scroller = narrow() ? document.scrollingElement : pane;
+  // Only a log the reader had scrolled to the end of follows new lines; a short pane is not "at the bottom".
+  const wasAtBottom = key === state.detailKey && sel?.type === 'job' && scroller.scrollHeight - scroller.clientHeight > 48 && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
   const keepScroll = key === state.detailKey ? pane.scrollTop : 0;
   state.detailKey = key;
   replace(pane, back, content);
   pane.scrollTop = keepScroll;
+  if (wasAtBottom) scroller.scrollTop = scroller.scrollHeight;
+  if (JOBS_API) renderJobsButton();
   if (scrollTo && keepScroll === 0) requestAnimationFrame(() => document.getElementById(scrollTo)?.scrollIntoView({ block: 'start' }));
 }
 
@@ -1107,7 +1379,7 @@ function setLive(next) {
 
 function startPolling() {
   if (pollTimer) return;
-  pollTimer = setInterval(() => loadModel({ announce: true }).then(() => setLive(source ? state.live : 'retrying')).catch(() => setLive('retrying')), 5000);
+  pollTimer = setInterval(() => loadModel({ announce: true }).then(() => { setLive(source ? state.live : 'retrying'); return refreshJobs(); }).catch(() => setLive('retrying')), 5000);
 }
 
 function connect() {
@@ -1116,6 +1388,7 @@ function connect() {
   source = new EventSource('api/events');
   source.addEventListener('open', () => { clearInterval(pollTimer); pollTimer = null; setLive('live'); loadModel({ announce: true }).catch(() => {}); });
   source.addEventListener('model', () => loadModel({ announce: true }).catch(() => {}));
+  source.addEventListener('jobs', () => refreshJobs().catch(() => {}));
   source.addEventListener('pushed', (event) => {
     if (!state.model) return;
     try { Object.assign(state.model.cycle, JSON.parse(event.data)); } catch { return; }
@@ -1167,7 +1440,7 @@ if (!SNAPSHOT) setInterval(() => { if (state.model?.cycle.hosted && !document.hi
 // Browsers allow six connections per origin. A hidden tab gives its stream back.
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) disconnect();
-  else { connect(); loadModel({ announce: true }).catch(() => {}); }
+  else { connect(); loadModel({ announce: true }).then(() => refreshJobs()).catch(() => {}); }
 });
 
 // ---------------------------------------------------------------------------
@@ -1243,6 +1516,7 @@ $('theme-button').addEventListener('click', () => {
   applyTheme(THEMES[(THEMES.indexOf(current) + 1) % THEMES.length]);
 });
 $('help-button').addEventListener('click', () => $('help-dialog').showModal());
+$('jobs-button').addEventListener('click', () => select({ type: 'jobs' }, { focusDetail: narrow() }));
 $('filter-button').addEventListener('click', () => { state.filtersOpen = !state.filtersOpen; renderFilters(); });
 $('search').addEventListener('input', (event) => { state.query = event.target.value; writeHash(); renderFilters(); renderQueue(); });
 
@@ -1263,6 +1537,7 @@ $('cycle-select').addEventListener('change', async (event) => {
   state.sel = null;
   state.model = null;
   state.detailKey = null;
+  state.jobDetail = null;
   writeHash({ push: true });
   disconnect();
   await loadModel();
@@ -1311,9 +1586,10 @@ async function boot() {
     if (!SNAPSHOT) state.cycles = (await fetch('api/cycles', { cache: 'no-store' }).then((r) => r.json())).cycles;
     if (!SNAPSHOT && !state.cycles.some((c) => c.id === state.cycle)) state.cycle = 'live';
     await loadModel();
-    if (state.model.cycle.hosted) await loadViewer();
+    if (state.model.cycle.hosted) { await loadViewer(); await loadJobs(); }
     markCurrent(true);
     connect();
+    if (state.sel?.type === 'job' || state.sel?.type === 'jobs') renderDetail();
   } catch (error) {
     // Mounted under a project path means hosted: there is no local server for the reader to restart.
     const hosted = /^\/p\//.test(location.pathname);
