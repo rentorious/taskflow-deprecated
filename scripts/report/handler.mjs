@@ -268,6 +268,11 @@ export async function createReportHandler({ backend, security = {}, canWrite = (
   const heartbeat = setInterval(() => { for (const client of clients) client.write(': keep-alive\n\n'); }, HEARTBEAT_MS);
   heartbeat.unref();
 
+  /** Something that is not the model changed (a job, say): tell the open pages which, and let them fetch it. */
+  function announce(name, data) {
+    for (const client of clients) client.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+
   function handleEvents(req, res) {
     res.writeHead(200, baseHeaders({ 'Content-Type': 'text/event-stream; charset=utf-8', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' }));
     res.write('retry: 3000\n\n');
@@ -340,6 +345,7 @@ export async function createReportHandler({ backend, security = {}, canWrite = (
     getState,
     /** Something was written that the backend's own watch may not have seen yet. */
     notify: refreshLive,
+    announce,
     clientCount: () => clients.size,
     close() {
       watcher?.close?.();

@@ -15,6 +15,8 @@ export const ACTIONS = Object.freeze({
   CREATE_PROJECT: 'project.create',
   MANAGE_TOKENS: 'tokens.manage',    // one's own CLI tokens
   SYNC_CYCLE: 'cycle.sync',          // push one's cycle, claim and release its batches, read their answers
+  REQUEST_JOB: 'jobs.request',       // start, cancel and answer jobs from the page
+  RUN_JOBS: 'jobs.run',              // a runner: register a machine, take jobs, report on them, ask
 });
 
 const SEES_THE_BOARD = new Set(['admin', 'developer']);
@@ -48,6 +50,12 @@ export function createAuthorizer({ signInRequired }) {
       case ACTIONS.SYNC_CYCLE:
         // The CLI's token or a browser session alike: both are that developer, and the cycle is always their own.
         return SEES_THE_BOARD.has(actor.role);
+      case ACTIONS.REQUEST_JOB:
+        // A person at the page. A job runs on that person's own machines, with that person's credentials.
+        return actor.via === 'session' && SEES_THE_BOARD.has(actor.role);
+      case ACTIONS.RUN_JOBS:
+        // A machine, holding its owner's token. Never a browser: a page has no claude to run.
+        return actor.via === 'token' && SEES_THE_BOARD.has(actor.role);
       case ACTIONS.MANAGE_MEMBERS:
         return actor.via === 'session' && (actor.role === 'admin' || actor.isInstanceAdmin === true);
       case ACTIONS.CREATE_PROJECT:

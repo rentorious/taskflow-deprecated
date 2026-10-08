@@ -22,7 +22,7 @@ test('a fresh database gets every table; a second boot has nothing to do', async
   try {
     const expected = (await readMigrations()).map((m) => m.file);
     assert.deepEqual(await migrate(t.db), expected);
-    assert.deepEqual(await tables(t.db), ['answer', 'api_token', 'app_user', 'audit_log', 'blob', 'claim', 'cycle', 'cycle_blob', 'inbox_tick', 'invite', 'membership', 'project', 'question_state', 'schema_migrations', 'session']);
+    assert.deepEqual(await tables(t.db), ['answer', 'api_token', 'app_user', 'audit_log', 'blob', 'claim', 'cycle', 'cycle_blob', 'inbox_tick', 'invite', 'job', 'job_event', 'job_question', 'machine', 'membership', 'project', 'question_state', 'schema_migrations', 'session']);
     assert.deepEqual(await migrate(t.db), []);
   } finally {
     await t.close();

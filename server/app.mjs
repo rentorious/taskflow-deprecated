@@ -5,6 +5,7 @@
 //   /auth/github, /auth/callback     GitHub sign-in;  POST /auth/logout
 //   /settings                        your CLI tokens; members and projects, if you manage any
 //   /api/me                          who a session or a token belongs to
+//   /api/p/<project>/jobs, /machines  the job queue: the page asks, a runner on the asker's machine answers
 //   /p/<project>/u/<login>/...       the report (scripts/report/handler.mjs), mounted
 //
 // The page's URLs are all relative, so the unchanged client works under that
@@ -25,6 +26,7 @@ import { MAX_BLOB_BYTES, MAX_PAYLOAD_BYTES } from '../scripts/report/payload.mjs
 import { importLocalHumanState } from './import-local.mjs';
 import { ingestCycle, putBlob } from './ingest.mjs';
 import { archiveCycle, claimBatch, cycleState, releaseBatch } from './sync.mjs';
+import { answerQuestion, appendEvents, askQuestion, awaitAnswer, cancelJob, getJob, leaseJobWait, listJobs, listMachines, parkQuestion, registerMachine, reportJob, reportUsage, requestJob } from './jobs.mjs';
 import { ACCOUNT_CSP, homePage, messagePage, notInvitedPage, settingsPage, signInPage } from './pages.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -34,6 +36,7 @@ const LOGIN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
 const MOUNT = /^\/p\/([^/]+)\/u\/([^/]+)(\/.*)?$/;
 const FONT = /^\/assets\/fonts\/([a-z0-9-]+\.woff2)$/;
 const SYNC = /^\/api\/p\/([^/]+)\/(sync\/cycle|sync\/blob\/[0-9a-f]{64}|claim|release|archive|import|state)$/;
+const JOBS = /^\/api\/p\/([^/]+)\/(jobs|machines)((?:\/[A-Za-z0-9-]+)*)$/;
 const IDLE_MS = 10 * 60 * 1000;
 const MAX_FORM_BYTES = 8 * 1024;
 const HEALTHCHECK_HOST = 'healthcheck.railway.app'; // Railway's deploy check arrives under this name
@@ -204,6 +207,70 @@ export function createHostedApp({ db, publicUrl, version = 'dev', auth: authConf
     return sendJson(res, 200, result);
   }
 
+  /**
+   * /api/p/<project>/jobs… and /machines: the queue. A page (session) requests, cancels and answers;
+   * a runner (token) registers its machine, leases, reports, forwards events and asks. Both are
+   * developers of the project, and a job is always the requesting developer's own.
+   */
+  async function jobRoutes(req, res, match, actor, url) {
+    const [, projectKey, head, tail] = match;
+    if (!actor) throw new HttpError(401, 'Sign in, or send a token.');
+    if (!PROJECT_KEY.test(projectKey)) throw notFound();
+    const role = await accounts.roleIn(projectKey, actor.id);
+    if (!role) throw notFound();
+    const who = { ...actor, role };
+    const parts = tail ? tail.slice(1).split('/') : [];
+    const who2 = { projectId: projectKey, userId: actor.id };
+    const asPage = () => {
+      if (!authorize(who, ACTIONS.REQUEST_JOB)) throw new HttpError(403, 'Only a developer of this project, in the browser, can do that.');
+      if (req.method !== 'GET' && !fromOurPages(req)) throw new HttpError(403, 'Cross-origin requests are not allowed.');
+    };
+    const asRunner = () => { if (!authorize(who, ACTIONS.RUN_JOBS)) throw new HttpError(403, 'Only a runner holding a developer token can do that.'); };
+    const asDeveloper = () => { if (!authorize(who, ACTIONS.SYNC_CYCLE)) throw new HttpError(403, 'Only a developer of this project can see jobs.'); };
+    const body = async () => readJson(req, 2 * 1024 * 1024);
+    const done = async (result) => { await notifyJobs(projectKey, result?.rev ?? null); return sendJson(res, 200, result); };
+
+    if (head === 'machines') {
+      if (parts.length === 0 && req.method === 'GET') { asDeveloper(); return sendJson(res, 200, { machines: await listMachines(db, who2) }); }
+      if (parts.length === 0 && req.method === 'POST') { asRunner(); const b = await body(); return sendJson(res, 200, { machine: await registerMachine(db, { userId: actor.id, id: b.id ?? null, name: b.name, kinds: b.kinds, concurrency: b.concurrency, runnerVersion: b.runnerVersion }) }); }
+      if (parts.length === 2 && parts[1] === 'usage' && req.method === 'POST') { asRunner(); const b = await body(); return done({ machine: await reportUsage(db, { userId: actor.id, machineId: parts[0], usage: b.usage ?? null, pausedUntil: b.pausedUntil ?? null }) }); }
+      throw notFound();
+    }
+
+    if (parts.length === 0) {
+      if (req.method === 'GET') { asDeveloper(); return sendJson(res, 200, await listJobs(db, { ...who2, limit: url.searchParams.get('limit') })); }
+      if (req.method === 'POST') { asPage(); const b = await body(); return done(await requestJob(db, { ...who2, kind: b.kind, args: b.args, machineId: b.machineId ?? null })); }
+      throw new HttpError(405, 'Method not allowed.');
+    }
+    if (parts[0] === 'next') {
+      if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed.');
+      asRunner();
+      const b = await body();
+      const leased = await leaseJobWait(db, { ...who2, machineId: b.machineId, kinds: b.kinds }, b.wait);
+      if (leased.job) await notifyJobs(projectKey, leased.rev ?? null);
+      return sendJson(res, 200, leased);
+    }
+    const jobId = parts[0];
+    if (parts.length === 1) {
+      if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed.');
+      asDeveloper();
+      return sendJson(res, 200, await getJob(db, { ...who2, jobId, after: url.searchParams.get('after') }));
+    }
+    if (req.method !== 'POST' && !(parts[1] === 'questions' && parts.length === 3 && req.method === 'GET')) throw new HttpError(405, 'Method not allowed.');
+    const what = parts.slice(1).join('/');
+    if (what === 'cancel') { asPage(); return done(await cancelJob(db, { ...who2, jobId })); }
+    if (what === 'events') { asRunner(); const b = await body(); return done(await appendEvents(db, { ...who2, jobId, machineId: b.machineId, events: b.events })); }
+    if (what === 'state') { asRunner(); const b = await body(); return done(await reportJob(db, { ...who2, jobId, machineId: b.machineId, state: b.state, sessionId: b.sessionId ?? null, result: b.result ?? null, error: b.error ?? null })); }
+    if (what === 'questions') { asRunner(); const b = await body(); return done(await askQuestion(db, { ...who2, jobId, machineId: b.machineId, kind: b.kind, question: b.question })); }
+    if (parts[1] === 'questions' && parts.length >= 3) {
+      const questionId = parts[2];
+      if (parts.length === 3) { asRunner(); return sendJson(res, 200, await awaitAnswer(db, { ...who2, jobId, questionId, waitMs: url.searchParams.get('wait') })); }
+      if (parts[3] === 'answer' && parts.length === 4) { asPage(); const b = await body(); return done(await answerQuestion(db, { ...who2, jobId, questionId, answer: b.answer ?? b })); }
+      if (parts[3] === 'park' && parts.length === 4) { asRunner(); const b = await body(); return done(await parkQuestion(db, { ...who2, jobId, machineId: b.machineId, questionId })); }
+    }
+    throw notFound();
+  }
+
   // -- routes that exist only with sign-in ------------------------------------------------
 
   async function accountRoutes(req, res, path, url, actor) {
@@ -319,6 +386,8 @@ export function createHostedApp({ db, publicUrl, version = 'dev', auth: authConf
       actor = resolved.actor;
       const sync = SYNC.exec(path);
       if (sync) return syncRoutes(req, res, sync, actor);
+      const jobs = JOBS.exec(path);
+      if (jobs) return jobRoutes(req, res, jobs, actor, url);
       const handled = await accountRoutes(req, res, path, url, actor);
       if (handled !== false) return handled;
     } else {
@@ -378,6 +447,10 @@ export function createHostedApp({ db, publicUrl, version = 'dev', auth: authConf
   /** A write made in this process: tell the open pages without waiting for the poll. */
   async function notify(projectId) {
     for (const [key, slot] of mounted) if (key.startsWith(`${projectId}:`)) (await slot.ready).notify();
+  }
+  /** A job changed: the pages of that project fetch the queue again. The model itself did not change. */
+  async function notifyJobs(projectId, rev) {
+    for (const [key, slot] of mounted) if (key.startsWith(`${projectId}:`)) (await slot.ready).announce('jobs', { rev });
   }
 
   return {
