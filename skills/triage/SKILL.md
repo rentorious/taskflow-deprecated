@@ -32,10 +32,16 @@ Before starting, verify:
 
 **If developer identity is missing from memory:**
 
-- Ask: "I don't have your identity saved. What's your full name?"
+- Ask: "I don't have your identity saved. What's your full name?" (as a job: `mcp__taskflow__ask`, no options; when nobody can answer, stop: "Developer identity is not in memory and nobody can be asked. Run `/taskflow:triage` once in a terminal to save it.")
 - Use `find_member(name)` to look up their provider user ID
-- Confirm the ID with the developer
+- Confirm the ID with the developer (as a job: `mcp__taskflow__ask` with options `["Yes, that's me", "No"]`)
 - Save name and provider user ID to Claude memory before proceeding
+
+---
+
+## Running as a Job — nobody is watching the terminal
+
+When a tool named `mcp__taskflow__ask` is in your tool list, the taskflow runner started this session headless from the hosted dashboard: no terminal, no `AskUserQuestion`, and a question written as text ends the job with nothing done. Triage has one point that waits on a human, the identity check above. There, call `mcp__taskflow__ask` with a question that stands alone on a phone, treat the result as the developer's reply, and never end a turn waiting for one. A result that says the job is PARKED means nobody answered in time: stop, change nothing further, and end your turn with one line saying where you stopped; the runner resumes this session with the answer quoted. When neither `mcp__taskflow__ask` nor `AskUserQuestion` exists, nobody can answer: take the default the step names. Everything else in triage runs without a person: questions for the client are written into `needs[]` (Step 4), never asked in the session, and the summary plus the push at Step 9 are the job's result.
 
 ---
 

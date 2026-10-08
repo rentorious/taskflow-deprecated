@@ -40,6 +40,21 @@ Before starting, verify:
 
 ---
 
+## Running as a Job — nobody is watching the terminal
+
+When a tool named `mcp__taskflow__ask` is in your tool list, the taskflow runner started this session headless from the hosted dashboard. There is no terminal and no `AskUserQuestion`. A question written as text ends the turn, and with it the job, with nothing done. So:
+
+- **Wherever this skill says ask, confirm or wait for a response, call `mcp__taskflow__ask` instead** and treat its result as the developer's own reply. Never end a turn waiting for a reply.
+- **One question per call, and it must stand alone.** The developer reads it on a phone, away from the terminal: name the batch and the task, say what happened (the failing command and the lines of its output that matter, not the whole log), what you would do, and what you need decided.
+- **Pass `options` whenever the answer is a choice** — two to eight short strings. The dashboard turns them into one-tap buttons; the developer may still type a reply of their own, so read the answer as text, never as an index.
+- **"PARKED" in the result means nobody answered in time.** Stop at once: no further edits, commits or pushes, and do not release the claim. End your turn with one line saying where you stopped. The runner resumes this same session when the answer arrives, with a message that quotes the question and the answer; carry on from that point exactly as if the tool had returned it.
+- **"Could not be delivered" in the result:** end your turn with one line saying what you needed to know. Do not guess.
+- **The Step 8 terminal summary is the job's result**, shown on the dashboard: print it as written there.
+
+When neither `mcp__taskflow__ask` nor `AskUserQuestion` is available, nobody can answer (a `claude -p` started by hand, for instance). Then take the **default** each wait point below names, say in the summary which defaults were taken, and never invent an answer. In an interactive session, ask in the conversation as before.
+
+---
+
 ## Provider Comments — DISABLED by default
 
 Posting developer-voice comments back to the provider is **off** unless `config.provider_comments` is exactly `true`. A missing key, `null`, or `false` all mean off. Reason: every comment is permanent provider-side storage, and comment volume counts against free-plan storage/usage quotas.
@@ -105,8 +120,8 @@ Follow these steps in order. Do not skip or reorder steps.
    | ---- | ------- | ----------- |
    | `0` | Claimed | Continue with the batch the output names. |
    | `2` | Blocking questions have no answer | Print the output as it is: it lists each question. Stop. Tell the developer to answer or drop them in the report (`/taskflow:report`) and run implement again. **There is no override.** Do not answer the questions yourself, do not proceed on a guess, and do not treat an answer typed into this conversation as recorded — it counts once it is saved in the report. |
-   | `3` | The batch is locked | The output says which case. *In progress under an existing claim:* ask "Batch N is in progress (claimed by a previous session). Resume from where it left off? [Y/n]". Yes → run the same command again with `--resume`; on exit 0 continue at the first task whose batch-file status is `"planned"` or `"in-progress"`. No → stop and mention `--unlock`. *Locked but never started:* ask "Batch N has a stale lock. Release it and reclaim? [Y/n]". Yes → `release <batch-key>`, then `claim <batch-key>` again. No → stop. *Being claimed by another session:* stop. |
-   | `5` | A dependency is not complete (named batch only) | Print the output. Ask whether to stop or to stack on the dependency's branch. Stack → run again with `--stack`. If the output says the dependency has no branch yet, stacking is not possible: stop. |
+   | `3` | The batch is locked | The output says which case. *In progress under an existing claim:* ask "Batch N is in progress (claimed by a previous session). Resume from where it left off?" — options `["Resume", "Stop"]`; default when nobody can answer: resume. Resume → run the same command again with `--resume`; on exit 0 continue at the first task whose batch-file status is `"planned"` or `"in-progress"`, and do not ask again when Step 3 finds the worktree. Stop → stop and mention `--unlock`. *Locked but never started:* ask "Batch N has a stale lock (a session crashed while claiming; no work was done). Release it and reclaim?" — options `["Release and reclaim", "Stop"]`; default: release and reclaim. Yes → `release <batch-key>`, then `claim <batch-key>` again. No → stop. *Being claimed by another session:* stop. |
+   | `5` | A dependency is not complete (named batch only) | Print the output. If it says the dependency has no branch yet, stacking is not possible: stop. Otherwise ask "Batch N depends on batch M, whose PR is not merged yet (branch `<dep-branch>`). Stack this batch on that branch, or stop?" — options `["Stack on <dep-branch>", "Stop"]`; default when nobody can answer: stop. Stack → run again with `--stack`. |
    | `6` | Nothing can be claimed | Print the output: it says what each batch waits on, including the questions to answer. Stop. |
    | `7` | Already complete, or gone stale | Print the output. Stop. |
    | `1` | Usage error (unknown batch, several developers and no `--dev-slug`) | Print the output. Stop. |
@@ -161,14 +176,16 @@ For each remaining task where `classification.confidence` is `"low"`:
    - The "Risks / Unknowns" section from the plan file
    - What's unclear (from the `unclear` field in the classification)
 
-2. Ask:
+2. Ask (as a job: one `mcp__taskflow__ask` call per task, with the three items above in the question text):
 
    > "This task is low confidence. How would you like to proceed?
    > (a) Attempt implementation with best guess
    > (b) Skip this task for now
    > (c) Provide more context before I start"
 
-3. Wait for a response before proceeding. Do not guess or auto-continue.
+   Options: `["Attempt it with my best guess", "Skip this task for now"]`. A typed reply that is neither is the context of (c).
+
+3. Wait for the response before proceeding. Do not guess or auto-continue. Default when nobody can answer: (b).
 
 4. Based on the response:
    - `(a)`: Proceed with implementation, note it was flagged low-confidence.
@@ -286,7 +303,7 @@ All commands are run from the worktree directory.
 
 - If lint or type-check fails: fix the issues before committing. Do not commit with known lint or type errors.
 - If tests fail: diagnose the failure. If it is caused by your changes, fix it. If it appears to be a pre-existing failure unrelated to your changes, note it explicitly and continue — do not block on pre-existing failures.
-- If you cannot fix a failure after two attempts, stop and report the specific error to the developer. Ask how to proceed.
+- If you cannot fix a failure after two attempts, report the specific error and ask how to proceed: "Task `<task-id>` (<title>): `<command>` still fails after two fix attempts: <the failing lines>. What next?" — options `["Stop the batch; I'll look at the worktree", "Skip this task and go on with the rest", "Keep trying with a hint I'll type"]`; default when nobody can answer: stop. Stop → keep the batch `"in-progress"`, keep the worktree, do not push, end with the error. Skip → `git stash push -u -m "<task-id>"` so the attempt is kept for the developer, leave the task `"planned"`, go on with the next task, and name the skipped task in the PR body. A typed hint → one more attempt with it, then this same question again.
 
 #### 4e. Commit the task
 
@@ -334,7 +351,7 @@ After all tasks in the batch are committed, run full verification from the workt
 - Do NOT push the branch
 - Report the exact failure output to the developer
 - Attempt to fix the failure. If you fix it, re-commit the fix and re-run all checks.
-- If you cannot fix it after two attempts, stop and keep the batch status as `"in-progress"` in the batch file. Ask the developer for guidance.
+- If you cannot fix it after two attempts, keep the batch status as `"in-progress"` in the batch file and ask: "Batch N: full verification fails after two fix attempts — `<command>`: <the failing lines>. What next?" — options `["Stop; keep the worktree for me", "Open the PR as a draft anyway, noting the failure", "Keep trying with a hint I'll type"]`; default when nobody can answer: stop. Stop → do not push, end with the error. Draft → Step 6, then Step 7 with `gh pr create --draft` and the failure quoted under "## Test Plan". A typed hint → one more attempt with it, then this same question again.
 
 Only proceed to Step 6 when all checks pass cleanly.
 
@@ -498,7 +515,7 @@ If Step 5 (full verification) fails:
 If the worktree directory already exists:
 
 - The lock directory also exists from the previous run.
-- Confirm with the developer before proceeding: "Worktree at `../<config.project_name>-<branch-name>` already exists. Resume from where we left off?"
+- If the developer already chose to resume at Step 1.6 (exit `3`), resume without asking again. Otherwise confirm first: "Worktree at `../<config.project_name>-<branch-name>` already exists. Resume from where we left off?" — options `["Resume", "Start fresh"]`; default when nobody can answer: resume.
 - If yes: skip worktree creation and install command, proceed to Step 4 starting from the first task with `status: "planned"` or `"in-progress"` (not `"committed"`)
 - If no: remove the existing worktree (`git worktree remove --force ../<config.project_name>-<branch-name>`), give the claim back (`node <taskflow_cli> release <batch-key> --dir <output_dir>`), then start fresh from Step 1
 
