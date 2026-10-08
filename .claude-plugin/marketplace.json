@@ -7,7 +7,7 @@
     {
       "name": "taskflow",
       "description": "Automated task triage and implementation from project management tools.",
-      "version": "1.6.0",
+      "version": "1.7.0",
       "source": "./",
       "author": {
         "name": "Ognjen Popovic"
