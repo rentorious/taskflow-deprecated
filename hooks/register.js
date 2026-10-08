@@ -20,11 +20,12 @@ let job = null; // { id, server, project, machineId, token }
 
 const base = () => `${job.server}/api/p/${job.project}`;
 
+// Every $.env.get is a mods API call, so it resolves asynchronously: always awaited.
 async function readToken($, server) {
-  const fromEnv = $.env.get('TASKFLOW_TOKEN');
+  const fromEnv = await $.env.get('TASKFLOW_TOKEN');
   if (fromEnv) return fromEnv;
-  const xdg = $.env.get('XDG_CONFIG_HOME');
-  const home = $.env.get('HOME');
+  const xdg = await $.env.get('XDG_CONFIG_HOME');
+  const home = await $.env.get('HOME');
   const path = `${xdg || `${home}/.config`}/taskflow/credentials.json`;
   const all = JSON.parse(await $.fs.read(path));
   return all[server]?.token ?? null;
@@ -54,11 +55,12 @@ async function waitFor($, questionId, limitMs) {
 
 export function register(on) {
   on('session.start', async ($, e, next) => {
-    const id = $.env.get('TASKFLOW_JOB_ID');
+    const id = await $.env.get('TASKFLOW_JOB_ID');
     if (!id) return next(e);
-    const server = $.env.get('TASKFLOW_JOB_SERVER');
-    const project = $.env.get('TASKFLOW_JOB_PROJECT');
-    const machineId = $.env.get('TASKFLOW_MACHINE_ID') || null;
+    const server = await $.env.get('TASKFLOW_JOB_SERVER');
+    const project = await $.env.get('TASKFLOW_JOB_PROJECT');
+    const machineId = (await $.env.get('TASKFLOW_MACHINE_ID')) || null;
+    if (!server || !project) return next(e);
     let token = null;
     try { token = await readToken($, server); } catch { /* no credentials: the tool will say so */ }
     job = { id, server, project, machineId, token };
