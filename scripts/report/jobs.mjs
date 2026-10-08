@@ -78,7 +78,9 @@ export function compactEvent(event) {
   const type = String(event.type ?? '');
   let out;
   if (type === 'assistant' || type === 'user') {
-    const content = Array.isArray(event.message?.content) ? event.message.content.map(compactBlock).filter(Boolean) : [];
+    // Raw (message.content) or already compacted (content): compacting twice must give the same event.
+    const blocks = Array.isArray(event.message?.content) ? event.message.content : Array.isArray(event.content) ? event.content : [];
+    const content = blocks.map(compactBlock).filter(Boolean);
     if (content.length === 0) return null;
     out = { type, content, ...(event.parent_tool_use_id ? { parent_tool_use_id: event.parent_tool_use_id } : {}) };
   } else if (type === 'system') {
@@ -109,7 +111,7 @@ export function compactResult(event) {
     stop_reason: event.stop_reason ?? null,
     terminal_reason: event.terminal_reason ?? null,
     session_id: event.session_id ?? null,
-    permission_denials: denials.slice(0, 50).map((d) => ({ tool_name: d.tool_name, input: clip(d.tool_input ?? {}, 300) })),
+    permission_denials: denials.slice(0, 50).map((d) => ({ tool_name: d.tool_name, input: clip(d.tool_input ?? d.input ?? {}, 300) })),
     usage: event.usage ? { input_tokens: event.usage.input_tokens, output_tokens: event.usage.output_tokens, cache_read_input_tokens: event.usage.cache_read_input_tokens, cache_creation_input_tokens: event.usage.cache_creation_input_tokens } : null,
     result: clip(event.result ?? '', TEXT_MAX),
   };

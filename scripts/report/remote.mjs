@@ -57,7 +57,7 @@ export async function saveToken(origin, token) {
  * @param {string|null} token
  */
 export function createRemote(server, token) {
-  async function call(method, path, { json, bytes } = {}) {
+  async function call(method, path, { json, bytes, plain = false } = {}) {
     if (!token) throw new RemoteError(`No token for ${server.url}. Create one under Settings there, then run: taskflow.mjs login ${server.url}`, { unreachable: true });
     let res;
     try {
@@ -74,7 +74,8 @@ export function createRemote(server, token) {
     if (res.ok) return body;
     const reason = body.error || `HTTP ${res.status}`;
     if (res.status === 401) throw new RemoteError(`${server.url} refused the token: ${reason} Run: taskflow.mjs login ${server.url}`, { status: 401, unreachable: true });
-    if (res.status === 404) throw new RemoteError(`${server.url} knows no project "${server.project}" that you belong to.`, { status: 404, unreachable: true });
+    // `plain`: a route where 404 means "no such job or machine", not "no such project".
+    if (res.status === 404 && !plain) throw new RemoteError(`${server.url} knows no project "${server.project}" that you belong to.`, { status: 404, unreachable: true });
     if (res.status === 429 || res.status >= 500) throw new RemoteError(`${server.url} could not answer: ${reason}`, { status: res.status, unreachable: true });
     throw new RemoteError(reason, { status: res.status });
   }
@@ -88,6 +89,14 @@ export function createRemote(server, token) {
     release: (batchKey) => call('POST', at('release'), { json: { batchKey } }),
     archive: (cycleId) => call('POST', at('archive'), { json: { cycleId } }),
     importLocal: (answers, ticks) => call('POST', at('import'), { json: { answers, ticks } }),
+
+    // -- the runner's side of the job queue --
+    registerMachine: (machine) => call('POST', at('machines'), { json: machine }),
+    reportUsage: (machineId, body) => call('POST', at(`machines/${machineId}/usage`), { json: body, plain: true }),
+    nextJob: (body) => call('POST', at('jobs/next'), { json: body, plain: true }),
+    job: (jobId) => call('GET', at(`jobs/${jobId}`), { plain: true }),
+    jobEvents: (jobId, body) => call('POST', at(`jobs/${jobId}/events`), { json: body, plain: true }),
+    reportJob: (jobId, body) => call('POST', at(`jobs/${jobId}/state`), { json: body, plain: true }),
 
     /**
      * The cycle as it is on disk right now, then whatever blobs the server lacks. Safe to repeat.

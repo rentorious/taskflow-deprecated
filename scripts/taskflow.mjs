@@ -10,6 +10,7 @@
 //   Hosted projects only (".claude/taskflow-config.json" has a "server" block):
 //   node taskflow.mjs login <url>                              store a CLI token for that server (read from stdin)
 //   node taskflow.mjs push [--import-answers]                  mirror the cycle to the server; a no-op when not hosted
+//   node taskflow.mjs runner [--kinds implement] [--once]      take jobs the dashboard queues for this machine and run claude for them
 //   node taskflow.mjs archive                                  tell the server the cycle is over (before /taskflow:clean moves it)
 //
 //   Common: [--dir <output_dir>] [--dev-slug <slug>] [--json]
@@ -33,8 +34,8 @@ import { findProject, listStateFiles, validServer } from './report/read.mjs';
 import { RemoteError, createRemote, readToken, saveToken } from './report/remote.mjs';
 
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-const COMMANDS = ['claim', 'release', 'answers', 'questions', 'status', 'login', 'push', 'archive'];
-const VALUE_OPTIONS = new Set(['--dir', '--dev-slug']);
+const COMMANDS = ['claim', 'release', 'answers', 'questions', 'status', 'login', 'push', 'archive', 'runner'];
+const VALUE_OPTIONS = new Set(['--dir', '--dev-slug', '--kinds', '--claude']);
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(name);
@@ -117,12 +118,19 @@ let remoteVerdict = null;
 if (!remote) {
   // Skills call these after every write without checking first. Not hosted: nothing to do, and that is fine.
   if (command === 'push' || command === 'archive') finish(EXIT.OK, { hosted: false }, ['This project is not hosted (no "server" in .claude/taskflow-config.json). Nothing to do.']);
+  if (command === 'runner') usage('The runner needs a hosted project: add "server" to .claude/taskflow-config.json.');
   const cycle = openCycle({ root: dir, slug, config: found.config });
   const built = await cycle.build();
   if (!built.raw.index) finish(EXIT.USAGE, { message: 'No triage state found.' }, ['No triage state found. Run /taskflow:triage first.']);
   ({ records, model } = built);
 } else {
   try {
+    if (command === 'runner') {
+      const { runRunner } = await import('./report/runner.mjs');
+      const kinds = (option('--kinds') ?? 'implement').split(',').map((k) => k.trim()).filter(Boolean);
+      const summary = await runRunner({ dir, found, remote, kinds, once: flag('--once'), claude: option('--claude') ?? process.env.TASKFLOW_CLAUDE ?? 'claude', pluginVersion });
+      finish(EXIT.OK, summary, [`Ran ${summary.ran} job${summary.ran === 1 ? '' : 's'}.${summary.last ? ` Last: ${summary.last.state}.` : ''}`]);
+    }
     if (command === 'push') {
       const pushed = await remote.push({ dir, slug, pluginVersion });
       const lines = [`${pushed.changed ? 'Pushed' : 'Unchanged'}: ${found.server.url}/p/${found.server.project}/ (${pushed.uploaded} file${pushed.uploaded === 1 ? '' : 's'} uploaded${pushed.archived ? `; the previous cycle was archived as ${pushed.archived}` : ''}).`];

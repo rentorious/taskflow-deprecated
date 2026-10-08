@@ -203,7 +203,8 @@ export async function leaseJobWait(db, options, waitMs) {
   }
 }
 
-const TRANSITIONS = { running: ['needs-input', 'done', 'failed', 'refused'], 'needs-input': ['running', 'failed'] };
+// running -> running is the runner naming the session it launched; the lease already made it running.
+const TRANSITIONS = { running: ['running', 'needs-input', 'done', 'failed', 'refused'], 'needs-input': ['running', 'failed'] };
 
 /** The runner says what became of a job it holds. */
 export function reportJob(db, { projectId, userId, jobId, machineId, state, sessionId = null, result = null, error = null }) {
