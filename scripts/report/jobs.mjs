@@ -7,6 +7,8 @@
 
 import { SAFE_NAME } from './read.mjs';
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 export const JOB_STATES = Object.freeze(['queued', 'running', 'needs-input', 'done', 'failed', 'refused', 'expired', 'cancelled']);
 export const OPEN_STATES = Object.freeze(['queued', 'running', 'needs-input']);
 export const QUESTION_KINDS = Object.freeze(['ask', 'permission']);
@@ -41,6 +43,22 @@ export const KINDS = Object.freeze({
     // Asked for when a sprint starts, not when a machine happens to be on: it may wait an hour for one.
     ttlMs: 60 * 60 * 1000,
     permissionMode: 'acceptEdits',
+  },
+  chat: {
+    // Reopen a job's session, interactive and with Remote Control on, in a detached tmux window on the
+    // machine that ran it. Not a headless run: no prompt, no mod, no job environment; the person talks
+    // to it from the Claude app or attaches in a terminal. The runner refuses it for a session it does
+    // not hold, since a transcript lives on the machine that made it.
+    args(input) {
+      const jobId = String(input?.jobId ?? '').toLowerCase();
+      if (!UUID.test(jobId)) throw new Error(`chat needs the id of the job whose session to open, got: ${jobId || '(none)'}`);
+      return { jobId };
+    },
+    prompt: () => null,
+    describe: (args) => `chat with job ${args.jobId.slice(0, 8)}`,
+    ttlMs: DEFAULT_TTL_MS,
+    permissionMode: null,
+    interactive: true,
   },
 });
 

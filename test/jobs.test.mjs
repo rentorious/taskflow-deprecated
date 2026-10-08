@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { JOB_KINDS, KINDS, compactEvent, compactResult, compactUsage, describeJob, validateJob } from '../scripts/report/jobs.mjs';
 
 test('a job is a known kind with validated args; the prompt is built from them alone', () => {
-  assert.deepEqual(JOB_KINDS, ['implement', 'triage']);
+  assert.deepEqual(JOB_KINDS, ['implement', 'triage', 'chat']);
   assert.deepEqual(validateJob('implement', { batchKey: 'batch-2', extra: 'ignored' }), { kind: 'implement', args: { batchKey: 'batch-2' } });
   assert.equal(KINDS.implement.prompt({ batchKey: 'batch-2' }), '/taskflow:implement batch-2');
   assert.equal(describeJob({ kind: 'implement', args: { batchKey: 'batch-2' } }), 'implement batch-2');
@@ -20,6 +20,12 @@ test('a job is a known kind with validated args; the prompt is built from them a
   assert.equal(describeJob({ kind: 'triage', args: {} }), 'triage');
   assert.equal(KINDS.triage.permissionMode, 'acceptEdits');
   assert.ok(KINDS.triage.ttlMs > KINDS.implement.ttlMs, 'a triage may wait longer for a machine to come online');
+  const jobId = '3f2a8c1e-5b7d-4e9a-8c1f-2d3e4f5a6b7c';
+  assert.deepEqual(validateJob('chat', { jobId: jobId.toUpperCase() }), { kind: 'chat', args: { jobId } });
+  assert.equal(KINDS.chat.interactive, true, 'a chat is not a headless run');
+  assert.equal(KINDS.chat.prompt({ jobId }), null);
+  assert.equal(describeJob({ kind: 'chat', args: { jobId } }), 'chat with job 3f2a8c1e');
+  for (const bad of [{}, { jobId: 'batch-2' }, { jobId: `${jobId}; rm -rf /` }]) assert.throws(() => validateJob('chat', bad), (error) => error.status === 400);
 });
 
 test('events are cut to what the pane shows, and cutting twice changes nothing', () => {

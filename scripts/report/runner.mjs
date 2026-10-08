@@ -11,13 +11,13 @@
 // One job at a time. The subscription window, not the machine, is the scarce
 // resource, and a session's rate_limit_event says how much of it is left.
 
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { KINDS, compactEvent, compactUsage, validateJob } from './jobs.mjs';
+import { KINDS, compactEvent, compactUsage, describeJob, validateJob } from './jobs.mjs';
 import { credentialsPath } from './remote.mjs';
 
 const POLL_WAIT_S = Number(process.env.TASKFLOW_POLL_WAIT_S ?? 25); // tests shorten the long-poll
@@ -25,8 +25,12 @@ const FLUSH_MS = 1000;
 const FLUSH_AT = 50;
 const PAUSE_AT_PERCENT = 95;
 const STDERR_TAIL = 2000;
+const CHAT_SETTLE_MS = Number(process.env.TASKFLOW_CHAT_SETTLE_MS ?? 6000); // how long the reopened session gets to print before its pane is read back
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+const run = (file, args, options = {}) => new Promise((resolve) => execFile(file, args, { ...options, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => resolve({ code: error ? (error.code ?? 1) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') })));
+/** A command for tmux's shell, with every argument quoted. */
+const shellLine = (args) => args.map((a) => `'${String(a).replace(/'/g, "'\\''")}'`).join(' ');
 
 /** The machine's identity, minted once and kept beside the credentials, keyed by server. */
 export function machineIdentity(origin, { name = hostname() } = {}) {
@@ -68,9 +72,10 @@ export function claudeArgs(job, { resume = false, sessionId, prompt }) {
  * @param {string[]} options.kinds   what this machine will run
  * @param {boolean} [options.once]   take one job (or none within one poll) and return; for tests
  * @param {string} [options.claude]  the binary; tests point it at a stand-in
+ * @param {string} [options.tmux]    the tmux binary, for chat jobs; tests point it at a stand-in
  * @param {Function} [options.log]
  */
-export async function runRunner({ dir, found, remote, kinds, once = false, claude = 'claude', pluginVersion = null, log = (line) => process.stderr.write(`${line}\n`) }) {
+export async function runRunner({ dir, found, remote, kinds, once = false, claude = 'claude', tmux = 'tmux', pluginVersion = null, log = (line) => process.stderr.write(`${line}\n`) }) {
   const wanted = kinds.filter((k) => k in KINDS);
   if (wanted.length === 0) throw new Error(`No runnable kinds. Known: ${Object.keys(KINDS).join(', ')}`);
   const identity = machineIdentity(remote.server.url);
@@ -99,16 +104,21 @@ export async function runRunner({ dir, found, remote, kinds, once = false, claud
       if (once) return summary;
       continue;
     }
-    summary.last = await runJob(leased, { dir, found, remote, machineId: machine.id, claude, log });
+    summary.last = await runJob(leased, { dir, found, remote, machineId: machine.id, machineName: machine.name, claude, tmux, log });
     summary.ran += 1;
     if (once) return summary;
   }
 }
 
 /** One job, start to end. Never throws for a job's own failure: that is reported, and the loop goes on. */
-async function runJob({ job, resume = false, answers = [], lastSeq = 0 }, { dir, found, remote, machineId, claude, log }) {
+async function runJob({ job, resume = false, answers = [], lastSeq = 0 }, { dir, found, remote, machineId, machineName = null, claude, tmux = 'tmux', log }) {
   const report = (body) => remote.reportJob(job.id, { machineId, ...body });
   const label = `${job.kind} ${JSON.stringify(job.args)}`;
+  const refuse = async (message) => {
+    log(`[runner] refused ${label}: ${message}`);
+    await report({ state: 'refused', error: message }).catch((e) => log(`[runner] could not report: ${e.message}`));
+    return { id: job.id, state: 'refused' };
+  };
 
   // The server named a kind and args; they are checked here again, against this file and this disk.
   try {
@@ -116,10 +126,9 @@ async function runJob({ job, resume = false, answers = [], lastSeq = 0 }, { dir,
     if (job.kind === 'implement' && !existsSync(join(dir, 'batches', `${job.args.batchKey}.json`))) throw new Error(`No batch ${job.args.batchKey} in ${dir}/batches. Push the cycle this machine has, or triage first.`);
     if (resume && !job.sessionId) throw new Error('A parked job without a session cannot be resumed.');
   } catch (error) {
-    log(`[runner] refused ${label}: ${error.message}`);
-    await report({ state: 'refused', error: error.message }).catch((e) => log(`[runner] could not report: ${e.message}`));
-    return { id: job.id, state: 'refused' };
+    return refuse(error.message);
   }
+  if (KINDS[job.kind].interactive) return openChat(job, { found, remote, machineId, machineName, claude, tmux, log, report, refuse });
 
   const sessionId = resume ? job.sessionId : randomUUID();
   const prompt = buildPrompt(job, { resume, answers });
@@ -189,4 +198,46 @@ async function runJob({ job, resume = false, answers = [], lastSeq = 0 }, { dir,
   await report({ state, sessionId, result: result ?? null, error }).catch((e) => log(`[runner] could not report ${state}: ${e.message}`));
   log(`[runner] ${state} ${label}${result?.total_cost_usd != null ? ` ($${result.total_cost_usd.toFixed(2)}, ${result.num_turns} turns)` : ''}${error ? `: ${error.split('\n')[0]}` : ''}`);
   return { id: job.id, state };
+}
+
+/**
+ * A chat job: reopen another job's session, interactive, with Remote Control on, in a detached tmux
+ * window. The window outlives this job and this runner; the job itself ends as soon as the window is
+ * up, with the pane's first lines as its result so the page can show how to reach the session.
+ */
+async function openChat(job, { found, remote, machineId, machineName, claude, tmux, log, report, refuse }) {
+  let target;
+  try { target = (await remote.job(job.args.jobId)).job; } catch (error) { return refuse(`The job to chat with could not be read: ${error.message}`); }
+  if (!target) return refuse('No such job to chat with.');
+  if (!target.sessionId) return refuse('That job has no session yet: nothing ran.');
+  if (target.machineId !== machineId) return refuse(`That session lives on ${target.machineName ?? 'another machine'}, not on ${machineName ?? 'this one'}. Start the chat from there.`);
+  if (target.state === 'running' || target.state === 'queued') return refuse(`That job is ${target.state}. Wait for it to end or park before chatting with its session.`);
+
+  const window = `taskflow-${target.id.slice(0, 8)}`;
+  const title = describeJob(target);
+  const attach = `tmux attach -t ${window}`;
+  const how = (pane) => [`Session ${target.sessionId} of "${title}" is open with Remote Control on ${machineName ?? 'your machine'}.`, 'Open it in the Claude app, or in a terminal:', `  ${attach}`, pane ? `\nThe window says:\n${pane}` : ''].join('\n').trim();
+  const finish = async (text) => {
+    const result = { type: 'result', subtype: 'success', is_error: false, session_id: target.sessionId, result: text };
+    await report({ state: 'done', sessionId: target.sessionId, result }).catch((e) => log(`[runner] could not report done: ${e.message}`));
+    log(`[runner] done ${describeJob(job)}: ${window}`);
+    return { id: job.id, state: 'done' };
+  };
+
+  await report({ state: 'running', sessionId: target.sessionId });
+  if ((await run(tmux, ['has-session', '-t', window])).code === 0) return finish(how('(already open from an earlier chat)'));
+
+  // No job environment: the mod stays inert, so the session's own questions go to the person, not to the dashboard.
+  const env = { ...process.env };
+  for (const name of ['CLAUDECODE', 'TASKFLOW_JOB_ID', 'TASKFLOW_JOB_PROJECT', 'TASKFLOW_JOB_SERVER', 'TASKFLOW_MACHINE_ID']) delete env[name];
+  const started = await run(tmux, ['new-session', '-d', '-s', window, '-c', found.root, shellLine([claude, '--resume', target.sessionId, '--remote-control', `taskflow ${title}`])], { env, cwd: found.root });
+  if (started.code !== 0) {
+    const error = `tmux could not open the window: ${(started.stderr || started.stdout || `exit ${started.code}`).trim()}`.slice(0, 2000);
+    await report({ state: 'failed', sessionId: target.sessionId, error }).catch((e) => log(`[runner] could not report failed: ${e.message}`));
+    log(`[runner] failed ${describeJob(job)}: ${error}`);
+    return { id: job.id, state: 'failed' };
+  }
+  await sleep(CHAT_SETTLE_MS);
+  const pane = await run(tmux, ['capture-pane', '-p', '-t', window, '-S', '-40']);
+  return finish(how(pane.code === 0 ? pane.stdout.trim().slice(-1500) : ''));
 }

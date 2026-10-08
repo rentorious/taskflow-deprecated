@@ -693,7 +693,12 @@ function elapsed(ms) {
   return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`;
 }
 const money = (usd) => (usd === null || usd === undefined ? '' : `$${Number(usd).toFixed(2)}`);
-const jobTitle = (job) => (job.kind === 'implement' ? `Implement ${state.model?.batches[job.args.batchKey] ? batchLabel(state.model.batches[job.args.batchKey]) : job.args.batchKey}` : job.kind === 'triage' ? 'Triage' : job.kind);
+const jobTitle = (job) => {
+  if (job.kind === 'implement') return `Implement ${state.model?.batches[job.args.batchKey] ? batchLabel(state.model.batches[job.args.batchKey]) : job.args.batchKey}`;
+  if (job.kind === 'triage') return 'Triage';
+  if (job.kind === 'chat') { const target = state.jobs?.jobs.find((j) => j.id === job.args.jobId); return target ? `Chat: ${jobTitle(target)}` : 'Chat with a session'; }
+  return job.kind;
+};
 const jobClock = (job) => {
   if (OPEN_JOB.has(job.state)) return job.state === 'queued' ? ago(job.createdAt) : `${elapsed(Date.now() - new Date(job.startedAt ?? job.leasedAt ?? job.createdAt).getTime())} so far`;
   return job.result?.duration_ms ? elapsed(job.result.duration_ms) : job.finishedAt ? `ended ${ago(job.finishedAt)}` : '';
@@ -741,6 +746,9 @@ async function postJob(path, payload, done) {
 
 const startJob = (batchKey) => postJob('/jobs', { kind: 'implement', args: { batchKey } }, 'Queued for your machine');
 const startTriage = () => postJob('/jobs', { kind: 'triage', args: {} }, 'Triage queued for your machine');
+// Pinned to the machine that ran the job: the session's transcript is there and nowhere else.
+const startChat = (job) => postJob('/jobs', { kind: 'chat', args: { jobId: job.id }, machineId: job.machineId }, 'Opening the session on your machine');
+const chatFor = (job) => state.jobs?.jobs.find((j) => j.kind === 'chat' && j.args.jobId === job.id && (OPEN_JOB.has(j.state) || j.state === 'done')) ?? null;
 const openTriage = () => state.jobs?.jobs.find((j) => j.kind === 'triage' && OPEN_JOB.has(j.state)) ?? null;
 const cancelJob = (job) => postJob(`/jobs/${encodeURIComponent(job.id)}/cancel`, {}, 'Cancelled');
 async function answerJobQuestion(question, answer) {
@@ -886,6 +894,15 @@ function jobQuestion(q) {
   return h('div', { class: 'job-question', dataset: { kind: q.kind, open: String(open) } }, head, meta, given, composer);
 }
 
+/** "Chat with this session": reopen an ended or parked job's session in the Claude app, through a chat job on its machine. */
+function chatControl(job) {
+  if (!canStartJobs() || job.kind === 'chat' || !job.sessionId || !job.machineId || !['done', 'failed', 'needs-input'].includes(job.state)) return null;
+  const chat = chatFor(job);
+  if (chat && OPEN_JOB.has(chat.state)) return h('button', { type: 'button', class: 'btn', onclick: () => select({ type: 'job', id: chat.id }, { focusDetail: narrow() }) }, `Chat: ${JOB_STATE[chat.state][1]}`);
+  if (chat) return h('button', { type: 'button', class: 'btn', onclick: () => select({ type: 'job', id: chat.id }, { focusDetail: narrow() }) }, 'Chat is open: how to reach it');
+  return h('button', { type: 'button', class: 'btn', onclick: () => startChat(job), title: 'Reopens this session on your machine with Remote Control on, so you can talk to it from the Claude app' }, 'Chat with this session');
+}
+
 function jobDetailView(id) {
   const d = state.jobDetail?.id === id ? state.jobDetail : null;
   if (!d) { loadJob(id).then(() => renderDetail()).catch(() => {}); return [h('div', { class: 'detail-empty' }, h('h2', null, 'Loading the job'))]; }
@@ -904,6 +921,7 @@ function jobDetailView(id) {
     h('div', { class: 'slip-actions job-actions' },
       batch ? h('button', { type: 'button', class: 'btn', onclick: () => select({ type: 'batch', id: batch.key }, { focusDetail: narrow() }) }, 'Open the batch') : null,
       job.state === 'queued' && canStartJobs() ? h('button', { type: 'button', class: 'btn', onclick: () => cancelJob(job) }, 'Cancel') : null,
+      chatControl(job),
       job.sessionId ? copyButton('Copy resume command', `claude --resume ${job.sessionId}`, 'Command copied') : null),
     h('dl', { class: 'facts' },
       fact('Machine', job.machineName ?? 'none yet'),

@@ -129,7 +129,7 @@ if (!remote) {
       const { runRunner } = await import('./report/runner.mjs');
       const { JOB_KINDS } = await import('./report/jobs.mjs');
       const kinds = (option('--kinds') ?? JOB_KINDS.join(',')).split(',').map((k) => k.trim()).filter(Boolean);
-      const summary = await runRunner({ dir, found, remote, kinds, once: flag('--once'), claude: option('--claude') ?? process.env.TASKFLOW_CLAUDE ?? 'claude', pluginVersion });
+      const summary = await runRunner({ dir, found, remote, kinds, once: flag('--once'), claude: option('--claude') ?? process.env.TASKFLOW_CLAUDE ?? 'claude', tmux: process.env.TASKFLOW_TMUX ?? 'tmux', pluginVersion });
       finish(EXIT.OK, summary, [`Ran ${summary.ran} job${summary.ran === 1 ? '' : 's'}.${summary.last ? ` Last: ${summary.last.state}.` : ''}`]);
     }
     if (command === 'push') {

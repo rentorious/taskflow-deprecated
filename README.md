@@ -114,7 +114,7 @@ Hosted projects (a `server` block in the config) add `login <url>`, `push`, `arc
 node scripts/taskflow.mjs runner [--kinds implement,triage]   # run the jobs the hosted dashboard queues for this machine
 ```
 
-The runner is the long-lived process on a developer's own machine. It takes the jobs the dashboard queues (**Start on my machine** on a ready batch, **Triage on my machine** on the Jobs page), runs the unmodified `claude` headless for each with the matching skill, and streams the session's log back. Questions the session would have asked in the terminal, and permissions the mode would have asked for, are routed to the dashboard by the plugin's mod and answered from a phone. Without `--kinds` it runs every kind it knows.
+The runner is the long-lived process on a developer's own machine. It takes the jobs the dashboard queues (**Start on my machine** on a ready batch, **Triage on my machine** on the Jobs page), runs the unmodified `claude` headless for each with the matching skill, and streams the session's log back. Questions the session would have asked in the terminal, and permissions the mode would have asked for, are routed to the dashboard by the plugin's mod and answered from a phone. **Chat with this session** on an ended or parked job reopens its session on the same machine, in a detached `tmux` window with Remote Control on, so the conversation continues in the Claude app. Without `--kinds` it runs every kind it knows.
 
 ## Development
 

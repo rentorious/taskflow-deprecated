@@ -5,6 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -17,11 +18,12 @@ import { profile, startHosted } from './helpers/hosted.mjs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, '..', '..', 'scripts', 'taskflow.mjs');
 const FAKE = join(HERE, '..', '..', 'test', 'helpers', 'fake-claude.mjs');
+const FAKE_TMUX = join(HERE, '..', '..', 'test', 'helpers', 'fake-tmux.mjs');
 const NOW = Date.UTC(2026, 1, 4, 12, 0, 0);
 
 function run(args, { cwd, home, env = {}, stdin = '' }) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [CLI, ...args], { cwd, env: { ...process.env, XDG_CONFIG_HOME: home, TASKFLOW_TOKEN: '', TASKFLOW_POLL_WAIT_S: '1', TASKFLOW_CLAUDE: FAKE, ...env } });
+    const child = spawn(process.execPath, [CLI, ...args], { cwd, env: { ...process.env, XDG_CONFIG_HOME: home, TASKFLOW_TOKEN: '', TASKFLOW_POLL_WAIT_S: '1', TASKFLOW_CLAUDE: FAKE, TASKFLOW_TMUX: FAKE_TMUX, TASKFLOW_CHAT_SETTLE_MS: '50', ...env } });
     let stdout = ''; let stderr = '';
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
@@ -107,6 +109,42 @@ describe('the runner', () => {
     assert.match(detail.events[1].content[0].text, /^prompt: \/taskflow:triage$/, 'no args, so the prompt is the bare skill');
     const { machines } = await (await ann.get(api('machines'))).json();
     assert.deepEqual(machines[0].kinds, ['implement', 'triage'], 'the machine now advertises both');
+  });
+
+  test('a chat job reopens an ended session in a tmux window with Remote Control, on the machine that ran it', async () => {
+    const { machines } = await (await ann.get(api('machines'))).json();
+    const ended = (await (await ann.get(api('jobs'))).json()).jobs.find((j) => j.kind === 'implement' && j.state === 'done' && j.sessionId);
+    assert.ok(ended, 'an implement job ended earlier in this suite');
+    const chat = (await (await ann.post(api('jobs'), { json: { kind: 'chat', args: { jobId: ended.id }, machineId: machines[0].id } })).json()).job;
+    assert.equal(chat.machineId, machines[0].id, 'pinned to the machine that holds the session');
+    const tmuxLog = join(root, 'tmux.log');
+    const res = await run(['runner', '--once', '--kinds', 'implement,triage,chat'], { cwd: root, home, env: { FAKE_TMUX_LOG: tmuxLog } });
+    assert.equal(res.code, 0, res.text);
+    const detail = await jobOf(chat.id);
+    assert.equal(detail.job.state, 'done', detail.job.error ?? '');
+    assert.equal(detail.job.sessionId, ended.sessionId, 'the chat job names the session it opened');
+    const started = readFileSync(tmuxLog, 'utf8').trim();
+    assert.match(started, new RegExp(`^new-session -d -s taskflow-${ended.id.slice(0, 8)} -c ${root} '${FAKE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}' '--resume' '${ended.sessionId}' '--remote-control' 'taskflow implement batch-2'$`), started);
+    assert.match(detail.job.result.result, /Remote Control on laptop|Remote Control on /);
+    assert.match(detail.job.result.result, new RegExp(`tmux attach -t taskflow-${ended.id.slice(0, 8)}`));
+    assert.match(detail.job.result.result, /claude\.ai\/code\/remote\/fake-pairing/, 'the pane is read back for the page');
+    assert.equal(detail.events.length, 0, 'no stream: nothing headless ran');
+
+    const again = (await (await ann.post(api('jobs'), { json: { kind: 'chat', args: { jobId: ended.id }, machineId: machines[0].id } })).json()).job;
+    await run(['runner', '--once', '--kinds', 'chat'], { cwd: root, home, env: { FAKE_TMUX_LOG: tmuxLog } });
+    assert.match((await jobOf(again.id)).job.result.result, /already open/, 'a second chat finds the window and does not start another');
+    assert.equal(readFileSync(tmuxLog, 'utf8').trim().split('\n').length, 1);
+  });
+
+  test('a chat with a job that never ran is refused', async () => {
+    const queued = await request('batch-5');
+    const chat = (await (await ann.post(api('jobs'), { json: { kind: 'chat', args: { jobId: queued.id } } })).json()).job;
+    const res = await run(['runner', '--once', '--kinds', 'chat'], { cwd: root, home });
+    assert.equal(res.code, 0, res.text);
+    const detail = await jobOf(chat.id);
+    assert.equal(detail.job.state, 'refused');
+    assert.match(detail.job.error, /no session yet/);
+    await ann.post(api(`jobs/${queued.id}/cancel`), { json: {} });
   });
 
   test('a batch this machine does not have is refused, not run', async () => {
