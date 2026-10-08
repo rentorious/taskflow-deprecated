@@ -7,13 +7,19 @@ import { test } from 'node:test';
 import { JOB_KINDS, KINDS, compactEvent, compactResult, compactUsage, describeJob, validateJob } from '../scripts/report/jobs.mjs';
 
 test('a job is a known kind with validated args; the prompt is built from them alone', () => {
-  assert.deepEqual(JOB_KINDS, ['implement']);
+  assert.deepEqual(JOB_KINDS, ['implement', 'triage']);
   assert.deepEqual(validateJob('implement', { batchKey: 'batch-2', extra: 'ignored' }), { kind: 'implement', args: { batchKey: 'batch-2' } });
   assert.equal(KINDS.implement.prompt({ batchKey: 'batch-2' }), '/taskflow:implement batch-2');
   assert.equal(describeJob({ kind: 'implement', args: { batchKey: 'batch-2' } }), 'implement batch-2');
   for (const bad of [['deploy', {}], ['implement', {}], ['implement', { batchKey: '../etc' }], ['implement', { batchKey: 'a b' }]]) {
     assert.throws(() => validateJob(...bad), (error) => error.status === 400);
   }
+  assert.deepEqual(validateJob('triage', { list: 'ignored: the skill reads the config' }), { kind: 'triage', args: {} });
+  assert.deepEqual(validateJob('triage'), { kind: 'triage', args: {} });
+  assert.equal(KINDS.triage.prompt({}), '/taskflow:triage');
+  assert.equal(describeJob({ kind: 'triage', args: {} }), 'triage');
+  assert.equal(KINDS.triage.permissionMode, 'acceptEdits');
+  assert.ok(KINDS.triage.ttlMs > KINDS.implement.ttlMs, 'a triage may wait longer for a machine to come online');
 });
 
 test('events are cut to what the pane shows, and cutting twice changes nothing', () => {

@@ -693,7 +693,7 @@ function elapsed(ms) {
   return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`;
 }
 const money = (usd) => (usd === null || usd === undefined ? '' : `$${Number(usd).toFixed(2)}`);
-const jobTitle = (job) => (job.kind === 'implement' ? `Implement ${state.model?.batches[job.args.batchKey] ? batchLabel(state.model.batches[job.args.batchKey]) : job.args.batchKey}` : job.kind);
+const jobTitle = (job) => (job.kind === 'implement' ? `Implement ${state.model?.batches[job.args.batchKey] ? batchLabel(state.model.batches[job.args.batchKey]) : job.args.batchKey}` : job.kind === 'triage' ? 'Triage' : job.kind);
 const jobClock = (job) => {
   if (OPEN_JOB.has(job.state)) return job.state === 'queued' ? ago(job.createdAt) : `${elapsed(Date.now() - new Date(job.startedAt ?? job.leasedAt ?? job.createdAt).getTime())} so far`;
   return job.result?.duration_ms ? elapsed(job.result.duration_ms) : job.finishedAt ? `ended ${ago(job.finishedAt)}` : '';
@@ -740,6 +740,8 @@ async function postJob(path, payload, done) {
 }
 
 const startJob = (batchKey) => postJob('/jobs', { kind: 'implement', args: { batchKey } }, 'Queued for your machine');
+const startTriage = () => postJob('/jobs', { kind: 'triage', args: {} }, 'Triage queued for your machine');
+const openTriage = () => state.jobs?.jobs.find((j) => j.kind === 'triage' && OPEN_JOB.has(j.state)) ?? null;
 const cancelJob = (job) => postJob(`/jobs/${encodeURIComponent(job.id)}/cancel`, {}, 'Cancelled');
 async function answerJobQuestion(question, answer) {
   document.activeElement?.blur();
@@ -786,10 +788,15 @@ function jobsList() {
   const jobs = state.jobs?.jobs ?? [];
   const open = jobs.filter((j) => OPEN_JOB.has(j.state));
   const past = jobs.filter((j) => !OPEN_JOB.has(j.state));
+  const triage = openTriage();
   return [
     h('div', { class: 'detail-head' },
       h('div', { class: 'detail-num', 'aria-hidden': 'true' }, '▶'),
-      h('div', null, h('h2', { class: 'detail-title' }, 'Jobs'), h('p', { class: 'detail-state' }, open.length ? `${plural(open.length, 'job')} open on your machines.` : 'Nothing is running. Start a ready batch from its page.'))),
+      h('div', null, h('h2', { class: 'detail-title' }, 'Jobs'), h('p', { class: 'detail-state' }, open.length ? `${plural(open.length, 'job')} open on your machines.` : 'Nothing is running. Start a ready batch from its page, or a triage here.'))),
+    canStartJobs() ? h('div', { class: 'slip-actions job-actions' },
+      h('button', { type: 'button', class: 'btn btn-primary', disabled: Boolean(triage) || null, onclick: () => startTriage() }, triage ? `Triage: ${JOB_STATE[triage.state][1]}` : 'Triage on my machine'),
+      triage ? h('button', { type: 'button', class: 'btn btn-quiet', onclick: () => select({ type: 'job', id: triage.id }, { focusDetail: narrow() }) }, 'Open the job')
+        : h('span', { class: 'slip-meta' }, 'Runs /taskflow:triage on your machine: pulls your to-do tasks, plans and batches them, then pushes the cycle here.')) : null,
     open.length ? h('section', { class: 'section' }, h('h3', { class: 'section-title' }, 'Open'), h('div', { class: 'lane-list' }, open.map(jobRow))) : null,
     past.length ? h('section', { class: 'section' }, h('h3', { class: 'section-title' }, 'Earlier'), h('div', { class: 'lane-list' }, past.map(jobRow))) : null,
     !jobs.length ? h('p', { class: 'slip-meta' }, 'No job has been asked for yet. A ready batch has a Start button; the runner on your machine picks it up.') : null,

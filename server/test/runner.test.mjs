@@ -92,6 +92,23 @@ describe('the runner', () => {
     assert.equal(machines[0].usage.rateLimits[0].percentUsed, 30);
   });
 
+  test('a triage job waits for a runner that lists the kind, then runs /taskflow:triage', async () => {
+    const job = (await (await ann.post(api('jobs'), { json: { kind: 'triage', args: {} } })).json()).job;
+    assert.ok(job?.id, 'a triage needs no args');
+    let res = await runner();
+    assert.equal(res.code, 0, res.text);
+    assert.equal((await jobOf(job.id)).job.state, 'queued', 'an implement-only runner leaves it for a machine that runs triage');
+    res = await run(['runner', '--once', '--kinds', 'implement,triage'], { cwd: root, home });
+    assert.equal(res.code, 0, res.text);
+    assert.match(res.text, /Ran 1 job/);
+    const detail = await jobOf(job.id);
+    assert.equal(detail.job.state, 'done');
+    assert.equal(detail.events[0].permissionMode, 'acceptEdits');
+    assert.match(detail.events[1].content[0].text, /^prompt: \/taskflow:triage$/, 'no args, so the prompt is the bare skill');
+    const { machines } = await (await ann.get(api('machines'))).json();
+    assert.deepEqual(machines[0].kinds, ['implement', 'triage'], 'the machine now advertises both');
+  });
+
   test('a batch this machine does not have is refused, not run', async () => {
     const job = await request('batch-404');
     const res = await runner();

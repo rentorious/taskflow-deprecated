@@ -32,6 +32,16 @@ export const KINDS = Object.freeze({
     // work and sends only the rest to the phone through the mod.
     permissionMode: 'acceptEdits',
   },
+  triage: {
+    // No args: the skill reads the lists to triage from the project's own config. The server keeps
+    // one open job per (kind, args), so a second Triage while one is open is refused, not queued twice.
+    args: () => ({}),
+    prompt: () => '/taskflow:triage',
+    describe: () => 'triage',
+    // Asked for when a sprint starts, not when a machine happens to be on: it may wait an hour for one.
+    ttlMs: 60 * 60 * 1000,
+    permissionMode: 'acceptEdits',
+  },
 });
 
 export const JOB_KINDS = Object.freeze(Object.keys(KINDS));

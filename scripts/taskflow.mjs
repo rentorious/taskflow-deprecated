@@ -10,7 +10,7 @@
 //   Hosted projects only (".claude/taskflow-config.json" has a "server" block):
 //   node taskflow.mjs login <url>                              store a CLI token for that server (read from stdin)
 //   node taskflow.mjs push [--import-answers]                  mirror the cycle to the server; a no-op when not hosted
-//   node taskflow.mjs runner [--kinds implement] [--once]      take jobs the dashboard queues for this machine and run claude for them
+//   node taskflow.mjs runner [--kinds implement,triage] [--once]   take jobs the dashboard queues for this machine and run claude for them (default: every kind it knows)
 //   node taskflow.mjs archive                                  tell the server the cycle is over (before /taskflow:clean moves it)
 //
 //   Common: [--dir <output_dir>] [--dev-slug <slug>] [--json]
@@ -127,7 +127,8 @@ if (!remote) {
   try {
     if (command === 'runner') {
       const { runRunner } = await import('./report/runner.mjs');
-      const kinds = (option('--kinds') ?? 'implement').split(',').map((k) => k.trim()).filter(Boolean);
+      const { JOB_KINDS } = await import('./report/jobs.mjs');
+      const kinds = (option('--kinds') ?? JOB_KINDS.join(',')).split(',').map((k) => k.trim()).filter(Boolean);
       const summary = await runRunner({ dir, found, remote, kinds, once: flag('--once'), claude: option('--claude') ?? process.env.TASKFLOW_CLAUDE ?? 'claude', pluginVersion });
       finish(EXIT.OK, summary, [`Ran ${summary.ran} job${summary.ran === 1 ? '' : 's'}.${summary.last ? ` Last: ${summary.last.state}.` : ''}`]);
     }

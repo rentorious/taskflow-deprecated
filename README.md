@@ -108,6 +108,14 @@ node scripts/taskflow.mjs answers <batch-key> # rewrite answers/<task>.md after 
 node scripts/taskflow.mjs questions <task-id> # JSON: exact wording and recorded answers, for triage to reuse
 ```
 
+Hosted projects (a `server` block in the config) add `login <url>`, `push`, `archive` and `runner`:
+
+```bash
+node scripts/taskflow.mjs runner [--kinds implement,triage]   # run the jobs the hosted dashboard queues for this machine
+```
+
+The runner is the long-lived process on a developer's own machine. It takes the jobs the dashboard queues (**Start on my machine** on a ready batch, **Triage on my machine** on the Jobs page), runs the unmodified `claude` headless for each with the matching skill, and streams the session's log back. Questions the session would have asked in the terminal, and permissions the mode would have asked for, are routed to the dashboard by the plugin's mod and answered from a phone. Without `--kinds` it runs every kind it knows.
+
 ## Development
 
 The plugin has no build step and no dependencies. The report's tests run on plain Node:
