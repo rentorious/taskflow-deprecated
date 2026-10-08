@@ -27,7 +27,10 @@ export const KINDS = Object.freeze({
     prompt: (args) => `/taskflow:implement ${args.batchKey}`,
     describe: (args) => `implement ${args.batchKey}`,
     ttlMs: DEFAULT_TTL_MS,
-    permissionMode: 'auto',
+    // acceptEdits, not auto: verified 2026-10-08 that `--permission-mode auto` under -p behaves as default here
+    // (a plain `ls` is denied), while acceptEdits plus the project's own allow rules runs everyday pnpm/git/node
+    // work and sends only the rest to the phone through the mod.
+    permissionMode: 'acceptEdits',
   },
 });
 

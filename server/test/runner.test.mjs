@@ -84,7 +84,7 @@ describe('the runner', () => {
     assert.equal(detail.job.result.result, 'Opened PR #1');
     assert.ok(detail.job.sessionId, 'the runner named the session it minted');
     assert.equal(detail.events[0].subtype, 'init');
-    assert.equal(detail.events[0].permissionMode, 'auto', 'auto mode, never bypass');
+    assert.equal(detail.events[0].permissionMode, 'acceptEdits', 'acceptEdits, never bypass');
     assert.ok(detail.events[1].content, JSON.stringify(detail.events.map((e) => [e.seq, e.type, e.subtype])));
     assert.match(detail.events[1].content[0].text, /^prompt: \/taskflow:implement batch-2$/, 'the prompt is built here, from the kind and args');
     assert.equal(detail.events.at(-1).type, 'result');
@@ -136,9 +136,12 @@ describe('the runner', () => {
     res = await runner({ env: { FAKE_CLAUDE_SCENARIO: 'ask' } });
     assert.equal(res.code, 0, res.text);
     assert.match(res.text, /resuming/);
+    const before = detail.events.length;
     detail = await jobOf(job.id);
     assert.equal(detail.job.state, 'done');
     assert.equal(detail.job.sessionId, session, 'the same session continues');
+    assert.ok(detail.events.length > before, 'the resumed session\'s events are kept, numbered after the parked ones');
+    assert.equal(detail.lastSeq, detail.events.at(-1).seq);
     assert.match(detail.job.result.result, /resumed with: .*Which colour\?.*Answer: green/s, 'the answer is quoted in the resume prompt');
   });
 

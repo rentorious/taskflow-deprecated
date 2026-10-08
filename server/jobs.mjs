@@ -148,7 +148,8 @@ export async function getJob(db, { projectId, userId, jobId, after = 0 }) {
   if (!job) throw fail(404, 'No such job.');
   const events = (await db.query('select seq, at, event from job_event where job_id = $1 and seq > $2 order by seq desc limit $3', [id, Number(after) || 0, TAIL])).rows.reverse();
   const questions = (await db.query('select * from job_question where job_id = $1 order by asked_at', [id])).rows.map(shapeQuestion);
-  return { job: shapeJob(job), events: events.map((e) => ({ seq: e.seq, at: e.at, ...e.event })), questions };
+  const lastSeq = Number((await db.query('select coalesce(max(seq), 0) as last from job_event where job_id = $1', [id])).rows[0].last);
+  return { job: shapeJob(job), events: events.map((e) => ({ seq: e.seq, at: e.at, ...e.event })), questions, lastSeq };
 }
 
 // -- the queue, from the runner's side -------------------------------------------------
@@ -189,7 +190,9 @@ export function leaseJob(db, { projectId, userId, machineId, kinds = [] }) {
     await audit(q, userId, projectId, resume ? 'job.resume' : 'job.lease', { job: row.id, machine: machine.id });
     const rev = await touch(q, projectId);
     const answers = resume ? (await q.query('select * from job_question where job_id = $1 and parked_at is not null and answered_at is not null order by asked_at', [row.id])).rows.map(shapeQuestion) : [];
-    return { job: await loadJob(q, row.id), resume, answers, rev };
+    // A resumed session's events continue the numbering, or they would all be dropped as duplicates.
+    const lastSeq = Number((await q.query('select coalesce(max(seq), 0) as last from job_event where job_id = $1', [row.id])).rows[0].last);
+    return { job: await loadJob(q, row.id), resume, answers, lastSeq, rev };
   });
 }
 

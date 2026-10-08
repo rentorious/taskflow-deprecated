@@ -106,7 +106,7 @@ export async function runRunner({ dir, found, remote, kinds, once = false, claud
 }
 
 /** One job, start to end. Never throws for a job's own failure: that is reported, and the loop goes on. */
-async function runJob({ job, resume = false, answers = [] }, { dir, found, remote, machineId, claude, log }) {
+async function runJob({ job, resume = false, answers = [], lastSeq = 0 }, { dir, found, remote, machineId, claude, log }) {
   const report = (body) => remote.reportJob(job.id, { machineId, ...body });
   const label = `${job.kind} ${JSON.stringify(job.args)}`;
 
@@ -131,7 +131,7 @@ async function runJob({ job, resume = false, answers = [] }, { dir, found, remot
   delete env.CLAUDECODE; // a runner started from inside a Claude session must still be allowed to start one
   const child = spawn(claude, args, { cwd: found.root, env, stdio: ['ignore', 'pipe', 'pipe'] });
 
-  let seq = 0;
+  let seq = Number(lastSeq) || 0; // a resumed job's events continue where the parked session's stopped
   let pending = [];
   let flushing = Promise.resolve();
   let result = null;
