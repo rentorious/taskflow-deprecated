@@ -30,7 +30,21 @@ import { answerQuestion, appendEvents, askQuestion, awaitAnswer, cancelJob, getJ
 import { ACCOUNT_CSP, homePage, messagePage, notInvitedPage, settingsPage, signInPage } from './pages.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const FONTS_DIR = join(HERE, '..', 'scripts', 'report', 'ui', 'fonts');
+const UI_DIR = join(HERE, '..', 'scripts', 'report', 'ui');
+const FONTS_DIR = join(UI_DIR, 'fonts');
+// The app as installed from the account pages: one app for the whole server, opening on the project list.
+// A developer's own dashboard carries its own manifest too, scoped to that one board.
+const ROOT_MANIFEST = JSON.stringify({
+  name: 'Taskflow', short_name: 'Taskflow', description: 'What is ready, what is blocked, and what is waiting on you.',
+  start_url: '/', scope: '/', display: 'standalone', background_color: '#dce2e3', theme_color: '#16222c',
+  icons: [
+    { src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+    { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+    { src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+    { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+  ],
+});
+const ROOT_ICONS = { '/icon.svg': 'image/svg+xml', '/icon-180.png': 'image/png', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png' };
 const PROJECT_KEY = /^[a-z0-9][a-z0-9-]{1,38}$/;
 const LOGIN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
 const MOUNT = /^\/p\/([^/]+)\/u\/([^/]+)(\/.*)?$/;
@@ -276,6 +290,14 @@ export function createHostedApp({ db, publicUrl, version = 'dev', auth: authConf
   async function accountRoutes(req, res, path, url, actor) {
     const get = req.method === 'GET' || req.method === 'HEAD';
 
+    if (path === '/manifest.webmanifest' && get) {
+      res.writeHead(200, baseHeaders({ 'Content-Type': 'application/manifest+json', 'Cache-Control': 'public, max-age=3600' }));
+      return res.end(ROOT_MANIFEST);
+    }
+    if (ROOT_ICONS[path] && get) {
+      res.writeHead(200, baseHeaders({ 'Content-Type': ROOT_ICONS[path], 'Cache-Control': 'public, max-age=86400' }));
+      return res.end(await readFile(join(UI_DIR, path.slice(1))));
+    }
     if (path === '/assets/account.css' && get) {
       res.writeHead(200, baseHeaders({ 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'public, max-age=3600' }));
       return res.end(await readFile(join(HERE, 'assets', 'account.css')));

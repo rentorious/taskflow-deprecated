@@ -15,7 +15,7 @@ export function html(strings, ...values) {
 }
 
 // These pages post plain forms, so unlike the dashboard they allow form-action 'self'. Still no script at all.
-export const ACCOUNT_CSP = ["default-src 'none'", "style-src 'self'", "font-src 'self'", "form-action 'self'", "base-uri 'none'", "frame-ancestors 'none'"].join('; ');
+export const ACCOUNT_CSP = ["default-src 'none'", "style-src 'self'", "font-src 'self'", "img-src 'self'", "manifest-src 'self'", "form-action 'self'", "base-uri 'none'", "frame-ancestors 'none'"].join('; ');
 
 function layout({ title, user = null, body }) {
   return `<!doctype html>\n${html`<html lang="en">
@@ -26,6 +26,10 @@ function layout({ title, user = null, body }) {
 <meta name="robots" content="noindex">
 <title>${title} · Taskflow</title>
 <link rel="stylesheet" href="/assets/account.css">
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<meta name="theme-color" content="#16222c">
 </head>
 <body>
 <main>
