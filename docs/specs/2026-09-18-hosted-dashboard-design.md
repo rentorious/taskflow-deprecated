@@ -1,6 +1,6 @@
 # Hosted dashboard with answers and an implement gate — design
 
-Status: Phase 0 implemented in 1.5.0 (2026-09-18); Phase 1 in progress, see "Amendments"; Phases 2–3 proposed. Builds on `2026-09-17-report-rework-design.md` (1.4.0).
+Status: Phase 0 implemented in 1.5.0 (2026-09-18); Phase 1 live since 2026-09-29 (1.6.0 + Railway); the plan from Phase 2 on was re-cut on 2026-10-08, see "Amendments B". Builds on `2026-09-17-report-rework-design.md` (1.4.0).
 
 ## Goal
 
@@ -427,3 +427,70 @@ above, the amendment wins.
 Without sign-in configured the server starts only when `PUBLIC_URL` is a loopback origin, read-only.
 The rule is "no authentication configured, so require loopback"; setting the four sign-in variables
 lifts it (1b, done). 1a, 1b and 1c are built (plugin 1.6.0); see `server/` and `scripts/report/remote.mjs`.
+
+## Amendments B (2026-10-08, pivot: the app is the interface, the machines are the hands)
+
+Decided with the developer on 2026-10-08, after Phase 1 went live (2026-09-29). Where a row here
+contradicts the text above, including "Amendments" A1–A17, this row wins.
+
+**What changed in the premise.** Two developers, a few clients, a non-commercial tool. Both developers
+have always-on machines where a daemon may run and start `claude` whenever work is queued. A commercial
+release is not planned; if it ever were, it would move to API keys and the Agent SDK, so nothing below
+is constrained by that case. F11 still holds in full: Claude runs on a developer's machine under that
+developer's own login, and the Railway service never runs Claude and never holds a Claude credential.
+
+**Verified against the Claude Code docs before writing this block (2026-10-08).** `--session-id <uuid>`
+lets the caller choose the id before launch (cli-reference). A transcript is appended live as JSONL at
+`~/.claude/projects/<project>/<session-id>.jsonl`; its format is internal and changes between versions
+(sessions). `--remote-control` is interactive-only and cannot be combined with `-p`; the terminal shows
+an `/rc active` link, and no machine-readable way to read that link is documented (remote-control). A
+session started with `-p` persists and can be resumed interactively with `--resume <id>` (sessions).
+`--dangerously-skip-permissions` equals `--permission-mode bypassPermissions`; `--worktree` creates
+`<repo>/.claude/worktrees/<name>` (cli-reference). NOT documented, so each is a spike before 2a: the
+fields of the final `stream-json` `result` event; what `-p` does when the model calls `AskUserQuestion`;
+what the CLI prints and exits with when the subscription window is used up; whether a reused
+`--session-id` is refused.
+
+| # | Above | Amended to | Why |
+|---|---|---|---|
+| B1 | D23: "Three tiers, in order: Remote Control server mode, a local runner, a cloud routine"; "MCP before the Start button" | **The runner is the foundation, not a tier.** It is built first. MCP moves after it and changes purpose (B12). Tier 0 ("Copy start command") stays as the fallback. Tier 2 (cloud routine) is dropped from the plan | The developers' machines are always on, so "laptop off" is no longer a case to design for. If the app is where work is dispatched, the thing that dispatches must exist before anything that talks to it |
+| B2 | `start_request(project, batch_key)`; "Triggering triage from the dashboard" out of scope | **A job queue.** `job(id, project_id, kind, args jsonb, requested_by, machine_id, state, session_id, worktree, cost_usd, duration_ms, started_at, finished_at, error, created_at)` with `state ∈ queued \| running \| needs-input \| done \| failed \| refused \| expired`. `kind` is a closed vocabulary, each kind with its own args schema: `triage`, `implement(batch_key)`, `address-review(pr)`, `fix-ci(pr)`, `review(pr)`, `uat(batch_key)`, `demo(batch_key)`, `set-status(task_id, status)`. D24 stands: never prompt text, only a kind and validated args. Triage from the dashboard is in scope | One table and one runner loop for every action the dashboard can start. A closed vocabulary keeps the server from being able to say anything to a developer's machine except names it already knows |
+| B3 | "launches the unmodified `claude` binary in a detached tmux session with Remote Control on" | **Headless first, interactive on demand.** The runner mints the session id, then runs `claude -p --session-id <id> --output-format stream-json --dangerously-skip-permissions` with the skill invocation as the prompt, inside a worktree. If the session ends needing a human (B10), the runner relaunches the same id with `claude --resume <id> --remote-control` in a detached tmux session, marks the job `needs-input` and notifies (B7). The link to that session is read best-effort from the tmux pane; if it cannot be read, the notification says which session name to open in the Claude app | Headless gives a documented event stream on stdout and never blocks on a prompt. Remote Control is interactive-only, so the two cannot be one process. Resuming by id (documented) turns "the session got stuck" into "the session is waiting for you on your phone" without losing the context |
+| B4 | PR and worktree state "as fresh as the last push" (D19) | **A live job log.** The runner forwards the `stream-json` events of a running job to `POST /api/p/<project>/jobs/<id>/events` (batched, bearer token); the server stores them per job and fans them out over the existing SSE channel. The dashboard shows a job pane: current tool call, last assistant text, elapsed time, and after the end the cost and duration from the `result` event. For a promoted interactive session the runner tails the transcript JSONL instead, parsed defensively (only `type`, role and content-block names), because that format is internal | Watching a session from the phone is the one thing the Claude app does that the dashboard did not. With the event stream it does, for the price of a forwarder. The transcript tail is best-effort by design: it must degrade to "running" when the format changes, never fail the job |
+| B5 | (not covered) | **The scheduler is rate-aware.** Per machine: a concurrency cap (default 1), FIFO within a project, oldest project first across projects. When a job ends because the subscription window is used up, the runner marks it `failed(usage-limit)` with the reset time if it can be parsed, pauses the machine until then, and the dashboard shows the pause. Jobs expire unclaimed after 10 minutes unless the kind says otherwise (`uat` 1 h) | The subscription window, not the machine, is the scarce resource. Five parallel sessions use the window by noon and then everything waits anyway; a queue with a cap spends it in order |
+| B6 | "the permission mode to launch with" (a spike) | **Permission policy per job kind, on the runner.** The runner holds an allow-list of kinds it will run on this machine, each with its launch flags. `implement`, `address-review`, `fix-ci`, `uat`, `demo` run with `--dangerously-skip-permissions` **only inside a fresh worktree**; `triage` and `review` run with `acceptEdits`; `set-status` is not a Claude session at all, it is one provider call made by the runner with the laptop's credentials. There is no job kind that can touch a production database, a deploy or a secret; such work stays a human session | The worktree is the sandbox, and the existing gates (pre-push hook, pull request, CI) stay the gates. Bypass is tolerable where the blast radius is a branch; it is not tolerable anywhere else, so those kinds do not exist |
+| B7 | 1e: "NO service worker"; the dashboard notifies nothing | **Web Push.** A push-only service worker (no caching, no offline), VAPID keys on the server, one subscription row per browser. Events: a job needs input, a job finished or failed, a pull request was opened, a question was answered on your cycle, a usage pause began. Each notification deep-links to the job or question | The point of the pivot is not having to watch. A phone that buzzes when a session needs a human is what makes headless-first acceptable. The 1e rule was about offline caching, which stays out |
+| B8 | D16, D19: no provider or repository credentials on the server (stand) | **Webhooks in, credentials still out.** The server accepts GitHub webhooks (`pull_request_review`, `check_suite`, `pull_request` closed/merged) and ClickUp webhooks (`taskCreated`, `taskUpdated` on the configured lists), verifies their signatures, and turns them into jobs (`address-review`, `fix-ci`) or inbox items (new sprint task → "triage?" tick; PR merged → `set-status` job + batch archive). All writes to GitHub and ClickUp are still made by the runner with that developer's own `gh` and ClickUp credentials | The review loop closes without the server holding a token that could write to every repository. A webhook secret can only make the server believe an event happened; the runner still validates the job against local state before acting |
+| B9 | "the runner picks up only its own user's requests for projects configured on that machine" | **Machines are first-class.** `machine(id, user_id, name, last_seen_at, kinds text[], concurrency)` registered by the runner on connect. A job may be pinned to a machine; `implement` records the machine that holds the worktree, and `address-review`, `fix-ci`, `uat`, `demo` for that batch are pinned to it. Unpinned jobs go to any online machine of the requesting user that lists the kind. The dev stack (database, search, pm2) lives on one machine, so `uat` is pinned there by configuration | A worktree cannot be resumed from the other laptop. Saying so in the data model is cheaper than discovering it in a failed job |
+| B10 | "Launching interactively … means implement's remaining prompts reach the phone instead of having to be removed" | **Skills must not block when headless.** Before 2a, triage and implement are audited for every point that waits on a human (implement has two today). Each becomes either a question asked before the job starts (a `needs[]` entry, so the existing gate carries it) or a documented default. A session that still asks (the `AskUserQuestion` tool in `-p` mode is undocumented, spike) is what triggers the B3 promotion, not the normal path | A headless job that stops to ask is a failed job with extra steps. The gate already exists to front-load human input; use it |
+| B11 | D12: "10 MB cap per file"; artefacts are cycle attachments only | **Job artefacts.** `uat` and `demo` attach screenshots and videos to the batch through the A5 blob store, keyed to the job; the per-file cap is 50 MB for job artefacts; they are archived with the cycle and deleted 30 days after archive | Nearly every batch in this project ends with "UAT owed". A job that runs the Playwright recipes and leaves the evidence on the batch page removes that debt by default. Video needs the larger cap; retention keeps Postgres from becoming a video archive |
+| B12 | "Claude as a second interface": `/mcp` as the answering interface; `answer_question` etc. | **MCP later, as a dispatch interface.** When built, the tools are `cycle_status`, `list_jobs`, `enqueue_job(kind, args)`, `list_open_questions`, `answer_question`. The claude.ai connector (OAuth server) stays a spike. The plan-aware `/taskflow:answers` skill is dropped: answers are typed in the app, and a re-plan is an `implement` job that reads them | With the app as the interface, Claude-as-interface is a convenience, not the path. Enqueuing from the Claude phone app ("start batch 3") is the one thing it adds |
+| B13 | "Out of scope: … answering directly (most clients)" | **Client view, last.** The `answerer` role grows into a per-project client page: sprint progress, demo videos, the questions addressed to them, and an approve action. Still GitHub sign-in; capability links for people without GitHub stay out | The questions already exist; the videos will. Showing them to the client replaces comment ping-pong in the provider. Deferred because nothing above depends on it |
+| B14 | Provider: fixed `lists[]` in the config | **Sprint-aware provider.** A project may name a ClickUp *sprint folder* instead of lists; triage resolves the active sprint list at cycle start and never reads the backlog. One cycle = one sprint; `/taskflow:clean` at sprint end. Status maps are per project. One server project per client, each with its own provider config on the laptop | Two developers, several clients, sprints and a backlog. The cycle already has the shape of a sprint; naming it so costs one provider lookup |
+| B15 | "Out of scope: Running Claude anywhere but the user's own machine or their own Anthropic cloud account" (stands) and nothing on commercial use | **Not a product.** Subscription use on the developers' own machines is the model. No multi-tenant release, no API keys, no hosted runner. If that ever changes, it is a new design, not an amendment | Keeps every decision above honest about who it is for |
+
+### Phases, re-cut (replaces "Phase 2" and "Phase 3" above)
+
+**Phase 2 — the runner.** Done when: Start on the phone runs implement headless on the developer's
+machine, the log is watched from the phone, a pull request appears, and a session that needs a human
+pings the phone and opens in the Claude app.
+
+1. **2a** — `job` and `machine` tables (`004_jobs.sql`), `/api/p/<project>/jobs` (create, list, get,
+   events), `/api/p/<project>/machines`; `taskflow runner` (zero-dependency, outbound long-poll with the
+   CLI token, allow-list and launch flags per kind, worktree per job); the `implement` kind headless
+   with the stream-json forwarder; the job pane in the dashboard. Spikes first: the `result` event
+   fields, `AskUserQuestion` under `-p`, a reused `--session-id`, the usage-limit message.
+2. **2b** — promotion to interactive (`--resume` in tmux with Remote Control, best-effort link), Web Push
+   with a push-only service worker, the `triage` kind, the implement/triage audit of B10.
+3. **2c** — scheduler hardening: concurrency, usage-limit pause, expiry, machine pinning, audit log rows
+   for every job transition; `set-status` as a runner-made provider call.
+
+**Phase 3 — webhooks.** GitHub and ClickUp webhooks with signature checks; `address-review`, `fix-ci`,
+`review`; PR merged → `set-status` + archive. Done when a review comment from the second developer
+produces a fix commit without anyone opening a terminal.
+
+**Phase 4 — evidence.** `uat` and `demo` kinds, artefact storage and retention, the batch page shows them.
+
+**Phase 5 — sprints and clients.** Sprint-aware provider, one project per client, the client view.
+
+**Later** — MCP as dispatch (B12), the claude.ai connector spike, the Railway template (1f).
