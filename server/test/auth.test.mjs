@@ -184,7 +184,7 @@ describe('who sees what', () => {
     const item = model.inbox['question:qs101:q-cover-ratio'];
     assert.equal(model.cycle.readOnly, false);
 
-    assert.deepEqual(await (await bob.get('/p/alpha/u/ann/api/me')).json(), { signedIn: true, login: 'bob', role: 'developer', owner: 'ann', ownsCycle: false, canWrite: false });
+    assert.deepEqual(await (await bob.get('/p/alpha/u/ann/api/me')).json(), { signedIn: true, login: 'bob', role: 'developer', owner: 'ann', ownsCycle: false, canWrite: false, push: { available: false, publicKey: null } });
     assert.equal((await bob.post('/p/alpha/u/ann/api/answer', { json: { id: item.id, fingerprint: item.fingerprint, body: 'Square.' } })).status, 403);
 
     assert.equal((await (await ann.get('/p/alpha/u/ann/api/me')).json()).canWrite, true);

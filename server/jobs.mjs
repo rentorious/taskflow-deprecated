@@ -268,7 +268,8 @@ export function askQuestion(db, { projectId, userId, jobId, machineId, kind, que
     const qid = randomUUID();
     const { rows } = await q.query('insert into job_question (id, job_id, project_id, kind, question) values ($1, $2, $3, $4, $5) returning *', [qid, id, projectId, kind, JSON.stringify(body)]);
     const rev = await touch(q, projectId);
-    return { question: shapeQuestion(rows[0]), rev };
+    // The job too, so the caller can tell the person who asked for it without a second read.
+    return { question: shapeQuestion(rows[0]), job: await loadJob(q, id), rev };
   });
 }
 function shapeAsked(kind, question) {

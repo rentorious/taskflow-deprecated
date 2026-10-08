@@ -6,6 +6,7 @@
 //   /settings                        your CLI tokens; members and projects, if you manage any
 //   /api/me                          who a session or a token belongs to
 //   /api/p/<project>/jobs, /machines  the job queue: the page asks, a runner on the asker's machine answers
+//   /api/push/subscriptions, /test   Web Push: a browser subscribes the person signed in there;  /sw.js shows what arrives
 //   /p/<project>/u/<login>/...       the report (scripts/report/handler.mjs), mounted
 //
 // The page's URLs are all relative, so the unchanged client works under that
@@ -28,6 +29,7 @@ import { ingestCycle, putBlob } from './ingest.mjs';
 import { archiveCycle, claimBatch, cycleState, releaseBatch } from './sync.mjs';
 import { answerQuestion, appendEvents, askQuestion, awaitAnswer, cancelJob, getJob, leaseJobWait, listJobs, listMachines, parkQuestion, registerMachine, reportJob, reportUsage, requestJob } from './jobs.mjs';
 import { ACCOUNT_CSP, homePage, messagePage, notInvitedPage, settingsPage, signInPage } from './pages.mjs';
+import { createPusher, deleteSubscription, notifyUsers, saveSubscription, vapidKeys } from './push.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const UI_DIR = join(HERE, '..', 'scripts', 'report', 'ui');
@@ -66,8 +68,10 @@ const notFound = () => new HttpError(404, 'Not found.');
  * @param {object} [options.github]       OAuth endpoints, for tests
  * @param {Function} [options.resolveActor]  without sign-in only: a test's stand-in for it
  * @param {boolean} [options.readOnly]    without sign-in only: tell the page to hide its write controls
+ * @param {{publicKey: string, privateKey: string, subject: string}|null} [options.push]  VAPID keys from config.mjs; null means no Web Push
+ * @param {Function} [options.pushFetch]  how push services are reached; a test points it at a stand-in
  */
-export function createHostedApp({ db, publicUrl, version = 'dev', auth: authConfig = null, github, trustProxy = false, resolveActor = async () => null, readOnly = true }) {
+export function createHostedApp({ db, publicUrl, version = 'dev', auth: authConfig = null, github, trustProxy = false, resolveActor = async () => null, readOnly = true, push = null, pushFetch = globalThis.fetch }) {
   const home = new URL(publicUrl);
   const allowedHost = home.host.toLowerCase();
   const signInRequired = Boolean(authConfig);
@@ -77,6 +81,36 @@ export function createHostedApp({ db, publicUrl, version = 'dev', auth: authConf
   const signInFailures = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 10 });
   const badTokens = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 20 });
   const mounted = new Map(); // "<project>:<owner id>" -> { ready, usedAt }
+
+  // -- Web Push ----------------------------------------------------------------------------
+  // Fire and forget: the reply to a runner or a page never waits on a push service.
+  const pusher = createPusher(push ? { keys: vapidKeys(push), subject: push.subject, fetch: pushFetch } : {});
+  const notifyPush = (userIds, payload) => { notifyUsers(db, pusher, { userIds, payload }).catch((error) => console.error(`push: ${error.message}`)); };
+  const board = (projectKey, login, hash = '') => `/p/${projectKey}/u/${login}/${hash}`;
+  const jobName = (job) => (job.kind === 'implement' ? `Implement ${job.args?.batchKey ?? ''}`.trim() : job.kind === 'triage' ? 'Triage' : job.kind);
+  // A batch's job and its pull request share a tag, so the later notification replaces the earlier one instead of stacking.
+  const jobTag = (job) => (job.kind === 'implement' && job.args?.batchKey ? `batch:${job.args.batchKey}` : `job:${job.id}`);
+  const clip = (text, max) => { const t = String(text ?? '').replace(/\s+/g, ' ').trim(); return t.length > max ? `${t.slice(0, max - 1)}…` : t; };
+  const firstLine = (text) => String(text ?? '').split('\n').find((line) => line.trim()) ?? '';
+  const pushQuestion = (projectKey, job, question) => ({
+    title: `${jobName(job)} needs you`,
+    body: clip(question.kind === 'permission' ? `Allow ${question.question.tool}? ${question.question.input}` : question.question.text, 180),
+    url: board(projectKey, job.requestedByLogin, `#/job/${job.id}`), tag: jobTag(job),
+  });
+  const pushEnded = (projectKey, job) => ({
+    title: `${jobName(job)} ${{ done: 'finished', failed: 'failed', refused: 'was refused' }[job.state] ?? job.state}`,
+    body: clip(firstLine(job.state === 'done' ? job.result?.result : job.error), 180),
+    url: board(projectKey, job.requestedByLogin, `#/job/${job.id}`), tag: jobTag(job),
+  });
+  const pushPaused = (projectKey, login, machine) => ({
+    title: `${machine.name} is paused`,
+    body: `The usage window is used up. Jobs resume ${machine.pausedUntil ? `at ${new Date(machine.pausedUntil).toISOString().slice(11, 16)} UTC` : 'later'}.`,
+    url: board(projectKey, login, '#/jobs'), tag: `machine:${machine.id}`,
+  });
+  const pushPullRequest = (projectKey, login, { batchKey, prUrl }) => ({
+    title: `Pull request opened for ${batchKey}`, body: prUrl,
+    url: board(projectKey, login, `#/batch/${encodeURIComponent(batchKey)}`), tag: `batch:${batchKey}`,
+  });
 
   function handlerFor(projectId, ownerId) {
     const key = `${projectId}:${ownerId}`;
@@ -199,6 +233,7 @@ export function createHostedApp({ db, publicUrl, version = 'dev', auth: authConf
     if (what === 'sync/cycle' && req.method === 'PUT') {
       const result = await ingestCycle(db, { ...who, payload: await readJson(req, MAX_PAYLOAD_BYTES + 1024) });
       await notify(projectKey);
+      for (const pr of result.prOpened) notifyPush([actor.id], pushPullRequest(projectKey, actor.login, pr));
       return sendJson(res, 200, result);
     }
     if (what.startsWith('sync/blob/') && req.method === 'PUT') {
@@ -247,7 +282,13 @@ export function createHostedApp({ db, publicUrl, version = 'dev', auth: authConf
     if (head === 'machines') {
       if (parts.length === 0 && req.method === 'GET') { asDeveloper(); return sendJson(res, 200, { machines: await listMachines(db, who2) }); }
       if (parts.length === 0 && req.method === 'POST') { asRunner(); const b = await body(); return sendJson(res, 200, { machine: await registerMachine(db, { userId: actor.id, id: b.id ?? null, name: b.name, kinds: b.kinds, concurrency: b.concurrency, runnerVersion: b.runnerVersion }) }); }
-      if (parts.length === 2 && parts[1] === 'usage' && req.method === 'POST') { asRunner(); const b = await body(); return done({ machine: await reportUsage(db, { userId: actor.id, machineId: parts[0], usage: b.usage ?? null, pausedUntil: b.pausedUntil ?? null }) }); }
+      if (parts.length === 2 && parts[1] === 'usage' && req.method === 'POST') {
+        asRunner();
+        const b = await body();
+        const machine = await reportUsage(db, { userId: actor.id, machineId: parts[0], usage: b.usage ?? null, pausedUntil: b.pausedUntil ?? null });
+        if (b.pausedUntil) notifyPush([actor.id], pushPaused(projectKey, actor.login, machine));
+        return done({ machine });
+      }
       throw notFound();
     }
 
@@ -274,8 +315,20 @@ export function createHostedApp({ db, publicUrl, version = 'dev', auth: authConf
     const what = parts.slice(1).join('/');
     if (what === 'cancel') { asPage(); return done(await cancelJob(db, { ...who2, jobId })); }
     if (what === 'events') { asRunner(); const b = await body(); return done(await appendEvents(db, { ...who2, jobId, machineId: b.machineId, events: b.events })); }
-    if (what === 'state') { asRunner(); const b = await body(); return done(await reportJob(db, { ...who2, jobId, machineId: b.machineId, state: b.state, sessionId: b.sessionId ?? null, result: b.result ?? null, error: b.error ?? null })); }
-    if (what === 'questions') { asRunner(); const b = await body(); return done(await askQuestion(db, { ...who2, jobId, machineId: b.machineId, kind: b.kind, question: b.question })); }
+    if (what === 'state') {
+      asRunner();
+      const b = await body();
+      const reported = await reportJob(db, { ...who2, jobId, machineId: b.machineId, state: b.state, sessionId: b.sessionId ?? null, result: b.result ?? null, error: b.error ?? null });
+      if (['done', 'failed', 'refused'].includes(reported.job.state)) notifyPush([reported.job.requestedBy], pushEnded(projectKey, reported.job));
+      return done(reported);
+    }
+    if (what === 'questions') {
+      asRunner();
+      const b = await body();
+      const asked = await askQuestion(db, { ...who2, jobId, machineId: b.machineId, kind: b.kind, question: b.question });
+      notifyPush([asked.job.requestedBy], pushQuestion(projectKey, asked.job, asked.question));
+      return done(asked);
+    }
     if (parts[1] === 'questions' && parts.length >= 3) {
       const questionId = parts[2];
       if (parts.length === 3) { asRunner(); return sendJson(res, 200, await awaitAnswer(db, { ...who2, jobId, questionId, waitMs: url.searchParams.get('wait') })); }
@@ -297,6 +350,26 @@ export function createHostedApp({ db, publicUrl, version = 'dev', auth: authConf
     if (ROOT_ICONS[path] && get) {
       res.writeHead(200, baseHeaders({ 'Content-Type': ROOT_ICONS[path], 'Cache-Control': 'public, max-age=86400' }));
       return res.end(await readFile(join(UI_DIR, path.slice(1))));
+    }
+    if (path === '/sw.js' && get) {
+      // At the root, so one browser holds one registration and one subscription however many boards it opens. Never cached long: a worker must update.
+      res.writeHead(200, baseHeaders({ 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache' }));
+      return res.end(await readFile(join(UI_DIR, 'sw.js')));
+    }
+    if (path === '/api/push/subscriptions' || path === '/api/push/test') {
+      if (!actor) throw new HttpError(401, 'Sign in.');
+      // A subscription is a browser's: it is made from a page of ours, by its session, never by a token.
+      if (actor.via !== 'session') throw new HttpError(403, 'Notifications belong to a browser session, not to a token.');
+      if (!fromOurPages(req)) throw new HttpError(403, 'Cross-origin requests are not allowed.');
+      if (!pusher.enabled) throw new HttpError(404, 'Web Push is not configured on this server.');
+      if (path === '/api/push/test') {
+        if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed.');
+        return sendJson(res, 200, await notifyUsers(db, pusher, { userIds: [actor.id], payload: { title: 'Taskflow will notify you here', body: 'When a job needs you, when it finishes, and when a pull request opens.', url: '/', tag: 'test' } }));
+      }
+      const b = await readJson(req, 16 * 1024);
+      if (req.method === 'POST') return sendJson(res, 200, await saveSubscription(db, { userId: actor.id, endpoint: b.endpoint, keys: b.keys, userAgent: b.userAgent }));
+      if (req.method === 'DELETE') return sendJson(res, 200, await deleteSubscription(db, { userId: actor.id, endpoint: b.endpoint }));
+      throw new HttpError(405, 'Method not allowed.');
     }
     if (path === '/assets/account.css' && get) {
       res.writeHead(200, baseHeaders({ 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'public, max-age=3600' }));
@@ -456,6 +529,7 @@ export function createHostedApp({ db, publicUrl, version = 'dev', auth: authConf
         owner: owner.login,
         ownsCycle,
         canWrite: authorize(actor, ACTIONS.WRITE_HUMAN, { ownsCycle }),
+        push: { available: pusher.enabled, publicKey: pusher.publicKey },
       });
     }
     const handler = await handlerFor(projectKey, owner.id);

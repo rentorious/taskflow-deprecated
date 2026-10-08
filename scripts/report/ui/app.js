@@ -1524,6 +1524,7 @@ $('theme-button').addEventListener('click', () => {
 });
 $('help-button').addEventListener('click', () => $('help-dialog').showModal());
 $('jobs-button').addEventListener('click', () => select({ type: 'jobs' }, { focusDetail: narrow() }));
+$('notify-button').addEventListener('click', () => toggleNotifications());
 $('filter-button').addEventListener('click', () => { state.filtersOpen = !state.filtersOpen; renderFilters(); });
 $('search').addEventListener('input', (event) => { state.query = event.target.value; writeHash(); renderFilters(); renderQueue(); });
 
@@ -1563,6 +1564,69 @@ function followAddress() {
 window.addEventListener('popstate', followAddress);
 window.addEventListener('hashchange', followAddress);
 
+// ---------------------------------------------------------------------------
+// Web Push: one subscription per browser, for the person signed in here.
+// ---------------------------------------------------------------------------
+
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+// Safari on iPhone allows push only to a page installed on the Home Screen.
+const onIphoneBrowser = () => /iPhone|iPad|iPod/.test(navigator.userAgent) && navigator.standalone !== true;
+const keyBytes = (b64u) => Uint8Array.from(atob(b64u.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(b64u.length / 4) * 4, '=')), (c) => c.charCodeAt(0));
+
+async function pushSubscription() {
+  const reg = await navigator.serviceWorker.getRegistration('/');
+  return (await reg?.pushManager.getSubscription()) ?? null;
+}
+async function pushCall(method, payload) {
+  const res = await fetch('/api/push/subscriptions', { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  if (signInAgain(res)) throw new Error('Signed out.');
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Could not save that (${res.status}).`);
+}
+function renderNotifyButton(on) {
+  const button = $('notify-button');
+  if (!state.me?.push?.available || !pushSupported()) { button.hidden = true; return; }
+  button.hidden = false;
+  button.textContent = on ? 'Notifying' : 'Notify me';
+  button.setAttribute('aria-pressed', String(on));
+  button.title = on ? 'This browser is told when a job needs you, finishes, or opens a pull request. Tap to stop.' : 'Be told here when a job needs you, finishes, or opens a pull request.';
+}
+/** On load: show the button, and keep the server's copy of an existing subscription current and bound to who is signed in. */
+async function syncPushState() {
+  if (!state.me?.push?.available || !pushSupported()) { renderNotifyButton(false); return; }
+  const sub = Notification.permission === 'granted' ? await pushSubscription().catch(() => null) : null;
+  renderNotifyButton(Boolean(sub));
+  if (sub) pushCall('POST', { ...sub.toJSON(), userAgent: navigator.userAgent.slice(0, 300) }).catch(() => {});
+}
+async function toggleNotifications() {
+  const button = $('notify-button');
+  button.disabled = true;
+  try {
+    const existing = await pushSubscription().catch(() => null);
+    if (existing) {
+      await existing.unsubscribe().catch(() => {});
+      await pushCall('DELETE', { endpoint: existing.endpoint }).catch(() => {});
+      renderNotifyButton(false);
+      toast('Notifications are off for this browser.', 3000);
+      return;
+    }
+    if (onIphoneBrowser()) { toast('On an iPhone, add this page to the Home Screen first (Share, then Add to Home Screen), open it from there, and tap Notify me again.', 8000); return; }
+    // The permission prompt must follow the tap directly; the registration can come after.
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') { toast('The browser did not allow notifications.', 3600); return; }
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(state.me.push.publicKey) });
+    await pushCall('POST', { ...sub.toJSON(), userAgent: navigator.userAgent.slice(0, 300) });
+    renderNotifyButton(true);
+    await fetch('/api/push/test', { method: 'POST' }).catch(() => {});
+    toast('Notifications are on. A first one is on its way.', 3600);
+  } catch (error) {
+    toast(error.message || 'Notifications could not be turned on.', 4000);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 /** Hosted only: who is looking, and whether they may write here. */
 async function loadViewer() {
   try {
@@ -1576,6 +1640,7 @@ async function loadViewer() {
         await fetch('/auth/logout', { method: 'POST' }).catch(() => {});
         location.href = '/';
       };
+      syncPushState().catch(() => {});
     }
     render();
   } catch {

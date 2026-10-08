@@ -424,6 +424,7 @@ input::placeholder { color: var(--ink-3); }
 /* ---- jobs: what a machine was asked to do ---------------------------------- */
 
 #jobs-button[data-attention='true'] { box-shadow: inset 0 -3px 0 var(--mark); }
+#notify-button[aria-pressed='true'] { box-shadow: inset 0 -3px 0 var(--live); }
 
 .job-row {
   display: grid; grid-template-columns: var(--tab) minmax(0, 1fr); align-items: start;

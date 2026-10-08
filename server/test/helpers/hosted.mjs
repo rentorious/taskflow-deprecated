@@ -13,7 +13,7 @@ const freePort = () => new Promise((resolve) => {
 let nextGithubId = 1000;
 export const profile = (login, extra = {}) => ({ id: nextGithubId++, login, name: `${login} (test)`, avatar_url: `https://avatars.example.com/${login}`, ...extra });
 
-export async function startHosted({ admins = ['ann'], secureCookies = false } = {}) {
+export async function startHosted({ admins = ['ann'], secureCookies = false, push = null, pushFetch } = {}) {
   const t = await testDb();
   const github = await fakeGithub();
   const port = await freePort();
@@ -21,6 +21,7 @@ export async function startHosted({ admins = ['ann'], secureCookies = false } = 
   const app = createHostedApp({
     db: t.db, publicUrl: origin, version: 'test', github: github.endpoints,
     auth: { clientId: github.clientId, clientSecret: github.clientSecret, sessionSecret: 'x'.repeat(40), admins, secureCookies },
+    push, ...(pushFetch ? { pushFetch } : {}),
   });
   await app.listen({ host: '127.0.0.1', port });
 

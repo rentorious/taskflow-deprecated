@@ -39,7 +39,7 @@ try {
 }
 
 // Without sign-in configured nobody can be signed in, so every write is refused before its body is read.
-const app = createHostedApp({ db, publicUrl: config.publicUrl, version: pluginVersion(), auth: config.auth, trustProxy: config.trustProxy });
+const app = createHostedApp({ db, publicUrl: config.publicUrl, version: pluginVersion(), auth: config.auth, trustProxy: config.trustProxy, push: config.push });
 await app.listen(config.bind);
 console.log(`Taskflow dashboard: ${config.publicUrl.origin} on ${config.bind.host}:${config.bind.port}${config.auth ? '' : ' (no sign-in configured: loopback only, read-only)'}`);
 

@@ -33,8 +33,19 @@ function sinceFirstSeen(payload, previous) {
   return { ...payload, problems: payload.problems.map((p) => (first.has(`${p.code}|${p.subject}`) ? { ...p, since: first.get(`${p.code}|${p.subject}`) } : p)) };
 }
 
+/** The batches whose pull request URL this push brings for the first time: what to tell the developer about. */
+export function newPullRequests(payload, previous) {
+  const before = previous?.batchFiles ?? {};
+  const opened = [];
+  for (const [batchKey, file] of Object.entries(payload.batchFiles ?? {})) {
+    const prUrl = file?.data?.pr_url;
+    if (typeof prUrl === 'string' && /^https:\/\//.test(prUrl) && before[batchKey]?.data?.pr_url !== prUrl) opened.push({ batchKey, prUrl });
+  }
+  return opened;
+}
+
 /**
- * @returns {Promise<{cycleUuid: string, changed: boolean, missing: string[], archived: string|null}>}
+ * @returns {Promise<{cycleUuid: string, changed: boolean, missing: string[], archived: string|null, prOpened: {batchKey: string, prUrl: string}[]}>}
  */
 export async function ingestCycle(db, { projectId, userId, payload }) {
   validatePayload(payload);
@@ -88,7 +99,8 @@ export async function ingestCycle(db, { projectId, userId, payload }) {
     const missing = manifest.length
       ? (await q.query('select h from unnest($2::text[]) as h where not exists (select 1 from blob where project_id = $1 and sha256 = h)', [projectId, manifest])).rows.map((r) => r.h)
       : [];
-    return { cycleUuid: cycle.id, changed, missing, archived };
+    // Only against a cycle the server already held: the first push of a cycle brings history, not news.
+    return { cycleUuid: cycle.id, changed, missing, archived, prOpened: existing ? newPullRequests(payload, existing.snapshot) : [] };
   });
 }
 

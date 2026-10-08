@@ -12,16 +12,23 @@
 //   ADMIN_GITHUB_LOGINS           /  comma-separated; the first people allowed in
 //   PORT                          where to listen when sign-in is on (hosts inject it)
 //   TRUST_PROXY=1                 take the client address from X-Forwarded-For
+//   VAPID_PUBLIC_KEY              \ both or none: Web Push to phones, with sign-in on
+//   VAPID_PRIVATE_KEY             /  (node server/push.mjs generate-keys)
+//   VAPID_SUBJECT                 optional; a mailto: or https: contact for the push service; PUBLIC_URL by default
+
+import { vapidKeys } from './push.mjs';
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost']);
 const AUTH_VARS = ['GITHUB_OAUTH_CLIENT_ID', 'GITHUB_OAUTH_CLIENT_SECRET', 'SESSION_SECRET', 'ADMIN_GITHUB_LOGINS'];
+const PUSH_VARS = ['VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY'];
+const SUBJECT = /^(mailto:[^\s@]+@[^\s@]+|https:\/\/\S+)$/;
 const LOGIN = /^[a-z0-9][a-z0-9-]{0,38}$/;
 
 const refuse = (message) => Object.assign(new Error(message), { config: true });
 
 /**
  * @param {Record<string, string|undefined>} env
- * @returns {{databaseUrl: string, publicUrl: URL, bind: {host: string, port: number}, auth: object|null, trustProxy: boolean}}
+ * @returns {{databaseUrl: string, publicUrl: URL, bind: {host: string, port: number}, auth: object|null, trustProxy: boolean, push: {publicKey: string, privateKey: string, subject: string}|null}}
  */
 export function readConfig(env) {
   if (!env.DATABASE_URL) throw refuse('DATABASE_URL is not set.');
@@ -43,13 +50,25 @@ export function readConfig(env) {
     throw refuse(`Sign-in is half configured. Also set: ${AUTH_VARS.filter((name) => !env[name]).join(', ')}.`);
   }
 
+  const pushGiven = PUSH_VARS.filter((name) => env[name]);
+  let push = null;
+  if (pushGiven.length && pushGiven.length < PUSH_VARS.length) throw refuse(`Web Push is half configured. Also set: ${PUSH_VARS.filter((name) => !env[name]).join(', ')}.`);
+  if (pushGiven.length) {
+    // A subscription belongs to a signed-in person; without sign-in there is nobody to notify.
+    if (!given.length) throw refuse('Web Push needs sign-in configured: notifications go to signed-in people.');
+    try { vapidKeys({ publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY }); } catch (error) { throw refuse(error.message); }
+    const subject = env.VAPID_SUBJECT || url.origin;
+    if (!SUBJECT.test(subject)) throw refuse('VAPID_SUBJECT must be a mailto: address or an https: URL.');
+    push = { publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY, subject };
+  }
+
   if (!given.length) {
     if (!loopback) {
       throw refuse(`No sign-in is configured, so this server only starts on a loopback address. PUBLIC_URL is ${url.origin}; use http://127.0.0.1:<port>, or set ${AUTH_VARS.join(', ')}. It would otherwise publish ticket text to anyone who can reach it.`);
     }
     if (!url.port) throw refuse('PUBLIC_URL needs a port, for example http://127.0.0.1:3900.');
     // The address is fixed here, never read from the environment: a stray HOST=0.0.0.0 must not open it up.
-    return { databaseUrl: env.DATABASE_URL, publicUrl: url, bind: { host: '127.0.0.1', port: Number(url.port) }, auth: null, trustProxy: false };
+    return { databaseUrl: env.DATABASE_URL, publicUrl: url, bind: { host: '127.0.0.1', port: Number(url.port) }, auth: null, trustProxy: false, push: null };
   }
 
   if (env.SESSION_SECRET.length < 32) throw refuse('SESSION_SECRET is too short: 32 characters at least (openssl rand -hex 32).');
@@ -73,6 +92,7 @@ export function readConfig(env) {
     publicUrl: url,
     bind,
     trustProxy: env.TRUST_PROXY === '1',
+    push,
     auth: {
       clientId: env.GITHUB_OAUTH_CLIENT_ID,
       clientSecret: env.GITHUB_OAUTH_CLIENT_SECRET,
